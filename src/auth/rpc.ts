@@ -1,6 +1,6 @@
 /**
- * The `/subscriptions-auth` host RPC channel the web Settings page drives. The
- * channel is registered only when a host `connection` service exists (the web
+ * The `/api/subscriptions-auth/*` host RPC endpoints the web Settings page drives. The
+ * endpoints are registered only when a host `connection` service exists (the web
  * profile); headless compositions load the plugin without it. All business
  * outcomes are returned as RpcResult values; handlers never throw.
  */
@@ -14,8 +14,11 @@ import type { AuthenticatedPrincipal } from '@deepseek-ai/dsh-llm'
 import { PROVIDER_IDS, type ProviderId } from './store.js'
 import type { ProviderUsage } from '../providers/common.js'
 
-/** The RPC channel this plugin registers on the host connection. */
-export const SUBSCRIPTIONS_AUTH_CHANNEL = '/subscriptions-auth'
+/** Shared authenticated RPC channel used by the web client. */
+export const SUBSCRIPTIONS_AUTH_CHANNEL = '/api'
+
+/** Endpoint prefix owned by this plugin on the shared channel. */
+export const SUBSCRIPTIONS_AUTH_PREFIX = 'subscriptions-auth/'
 
 /** Media types the attachment store accepts (ImageMediaType). */
 const IMAGE_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] as const
@@ -261,12 +264,12 @@ async function dispatch(
       await speed.setSpeed(readSessionId(payload), readSpeedTier(payload))
       return ok({ ok: true })
     default:
-      throw new BadRequest(`unknown /subscriptions-auth endpoint "${endpoint}"`)
+      throw new BadRequest(`unknown /api/${SUBSCRIPTIONS_AUTH_PREFIX}${endpoint} endpoint`)
   }
 }
 
 /**
- * Register the `/subscriptions-auth` RPC channel when a host connection exists.
+ * Register the `/api/subscriptions-auth/*` RPC endpoints when a host connection exists.
  * @param ctx - the plugin context (headless profiles have no `connection`).
  * @param controller - the auth operations backing the endpoints.
  * @param speed - the per-session speed-tier state backing the Speed toggle.
@@ -278,18 +281,27 @@ export function registerAuthRpc(ctx: Context, controller: AuthController, speed:
   ctx.inject(['connection'], (ctx) => {
     const connection = ctx.get('connection') as HostConnectionHandle
     ctx.effect(
-      () => connection.rpc.handle(
+      () => connection.rpc.intercept(
         SUBSCRIPTIONS_AUTH_CHANNEL,
+        endpoint => endpoint.startsWith(SUBSCRIPTIONS_AUTH_PREFIX)
+          && endpoint.length > SUBSCRIPTIONS_AUTH_PREFIX.length,
         async (endpoint, payload, signal, principal) => {
           try {
-            return await dispatch(controller, speed, endpoint, payload, signal, principal)
+            return await dispatch(
+              controller,
+              speed,
+              endpoint.slice(SUBSCRIPTIONS_AUTH_PREFIX.length),
+              payload,
+              signal,
+              principal,
+            )
           } catch (error) {
             return failure(error)
           }
         },
         { authority: 'loopback' },
       ),
-      'dsh-plugin-subscriptions: /subscriptions-auth rpc channel',
+      'dsh-plugin-subscriptions: /api/subscriptions-auth/* rpc endpoints',
     )
   })
 }

@@ -1,6 +1,6 @@
 /**
  * Subscription usage lookups: fetchCodexUsage / fetchClaudeUsage payload
- * mapping (via an injected fetch, no network) and the `/subscriptions-auth`
+ * mapping (via an injected fetch, no network) and the `/api/subscriptions-auth/*`
  * `usage` endpoint answering `{ supported: false }` for providers without a
  * usage fetcher and an error result for a logged-out provider.
  */
@@ -266,7 +266,7 @@ async function mount(): Promise<ConnectionRpcHandler> {
   ctx.provide('llm', { registerAdapter: () => Object.assign(() => {}, { replace: () => {} }) })
   ctx.provide('connection', {
     rpc: {
-      handle: (_channel: string, h: ConnectionRpcHandler) => {
+      intercept: (_channel: string, _matches: (endpoint: string) => boolean, h: ConnectionRpcHandler) => {
         handler = h
         return () => Promise.resolve()
       },
@@ -274,20 +274,20 @@ async function mount(): Promise<ConnectionRpcHandler> {
   })
   ctx.plugin(plugin, { providers: ['codex'] })
   await new Promise(resolve => setTimeout(resolve, 50))
-  assert.ok(handler !== undefined, 'the /subscriptions-auth channel was registered')
+  assert.ok(handler !== undefined, 'the /api/subscriptions-auth/* endpoints were registered')
   return handler
 }
 
 test('usage endpoint: provider without a usage fetcher answers supported:false', async () => {
   const handler = await mount()
   // Only codex is registered, so grok never got a usage fetcher.
-  const result = await handler('usage', { provider: 'grok' }, new AbortController().signal, undefined)
+  const result = await handler('subscriptions-auth/usage', { provider: 'grok' }, new AbortController().signal, undefined)
   assert.deepEqual(result, { ok: true, value: { supported: false } })
 })
 
 test('usage endpoint: logged-out provider answers an error result', async () => {
   const handler = await mount()
-  const result = await handler('usage', { provider: 'codex' }, new AbortController().signal, undefined)
+  const result = await handler('subscriptions-auth/usage', { provider: 'codex' }, new AbortController().signal, undefined)
   assert.equal(result.ok, false)
   if (!result.ok) {
     assert.equal(result.error.code, 'internal')
@@ -299,11 +299,11 @@ test('usage endpoint: subaccounts cannot inspect provider quota', async () => {
   const handler = await mount()
   const signal = new AbortController().signal
   const child = { source: 'dsh-passwords', id: '2', username: 'child', role: 'user' } as const
-  const status = await handler('status', {}, signal, child)
+  const status = await handler('subscriptions-auth/status', {}, signal, child)
   assert.equal(status.ok, true)
   if (status.ok) assert.equal((status.value as { canViewUsage: boolean }).canViewUsage, false)
 
-  const result = await handler('usage', { provider: 'codex' }, signal, child)
+  const result = await handler('subscriptions-auth/usage', { provider: 'codex' }, signal, child)
   assert.equal(result.ok, false)
   if (!result.ok) assert.match(result.error.message, /only to administrators/)
 })
@@ -312,17 +312,17 @@ test('usage endpoint: administrators retain provider quota access', async () => 
   const handler = await mount()
   const signal = new AbortController().signal
   const admin = { source: 'dsh-passwords', id: '1', username: 'owner', role: 'admin' } as const
-  const status = await handler('status', {}, signal, admin)
+  const status = await handler('subscriptions-auth/status', {}, signal, admin)
   assert.equal(status.ok, true)
   if (status.ok) assert.equal((status.value as { canViewUsage: boolean }).canViewUsage, true)
 
-  const result = await handler('usage', { provider: 'grok' }, signal, admin)
+  const result = await handler('subscriptions-auth/usage', { provider: 'grok' }, signal, admin)
   assert.deepEqual(result, { ok: true, value: { supported: false } })
 })
 
 test('usage endpoint: payload validation rejects unknown providers', async () => {
   const handler = await mount()
-  const result = await handler('usage', { provider: 'gemini' }, new AbortController().signal, undefined)
+  const result = await handler('subscriptions-auth/usage', { provider: 'gemini' }, new AbortController().signal, undefined)
   assert.equal(result.ok, false)
   if (!result.ok) assert.equal(result.error.code, 'bad-request')
 })

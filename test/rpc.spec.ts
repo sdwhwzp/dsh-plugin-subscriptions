@@ -1,5 +1,5 @@
 /**
- * Unit tests for the `/subscriptions-auth` `image` endpoint: payload
+ * Unit tests for the `/api/subscriptions-auth/image` endpoint: payload
  * validation, the base64 round trip through a fake attachment store, and the
  * no-service / read-failure error results. Drives the real plugin wiring with
  * a fake host connection; DSH_HOME is redirected to a temp dir.
@@ -30,7 +30,7 @@ async function mount(attachments?: FakeStore): Promise<ConnectionRpcHandler> {
   ctx.provide('llm', { registerAdapter: () => Object.assign(() => {}, { replace: () => {} }) })
   ctx.provide('connection', {
     rpc: {
-      handle: (_channel: string, h: ConnectionRpcHandler) => {
+      intercept: (_channel: string, _matches: (endpoint: string) => boolean, h: ConnectionRpcHandler) => {
         handler = h
         return () => Promise.resolve()
       },
@@ -39,7 +39,7 @@ async function mount(attachments?: FakeStore): Promise<ConnectionRpcHandler> {
   if (attachments !== undefined) ctx.provide('attachments', attachments)
   ctx.plugin(plugin, { providers: ['codex'] })
   await new Promise(resolve => setTimeout(resolve, 50))
-  assert.ok(handler !== undefined, 'the /subscriptions-auth channel was registered')
+  assert.ok(handler !== undefined, 'the /api/subscriptions-auth/* endpoints were registered')
   return handler
 }
 
@@ -49,7 +49,7 @@ async function call(
   handler: ConnectionRpcHandler,
   payload: unknown,
 ): Promise<RpcResult<unknown>> {
-  return handler('image', payload, new AbortController().signal, undefined)
+  return handler('subscriptions-auth/image', payload, new AbortController().signal, undefined)
 }
 
 test('image endpoint: base64 round trip through the attachment store', async () => {
@@ -113,7 +113,7 @@ test('video endpoint: base64 round trip from the videos directory', async () => 
   mkdirSync(videosDir, { recursive: true })
   writeFileSync(join(videosDir, 'clip.mp4'), Buffer.from('hi'))
   const handler = await mount()
-  const result = await handler('video', { name: 'clip.mp4' }, new AbortController().signal, undefined)
+  const result = await handler('subscriptions-auth/video', { name: 'clip.mp4' }, new AbortController().signal, undefined)
   assert.deepEqual(result, { ok: true, value: { mediaType: 'video/mp4', dataBase64: 'aGk=' } })
 })
 
@@ -128,11 +128,11 @@ test('video endpoint: name validation and missing file', async () => {
     'nope',
   ]
   for (const payload of bad) {
-    const result = await handler('video', payload, new AbortController().signal, undefined)
+    const result = await handler('subscriptions-auth/video', payload, new AbortController().signal, undefined)
     assert.equal(result.ok, false, JSON.stringify(payload))
     if (!result.ok) assert.equal(result.error.code, 'bad-request')
   }
-  const missing = await handler('video', { name: 'absent.mp4' }, new AbortController().signal, undefined)
+  const missing = await handler('subscriptions-auth/video', { name: 'absent.mp4' }, new AbortController().signal, undefined)
   assert.equal(missing.ok, false)
   if (!missing.ok) assert.equal(missing.error.code, 'internal')
 })
@@ -141,25 +141,25 @@ test('speed endpoints: per-session tier round trip and payload validation', asyn
   const handler = await mount()
   const signal = new AbortController().signal
   // Logged out and undiscovered: standard tier, no fast-capable models.
-  assert.deepEqual(await handler('speed', { sessionId: 's1' }, signal, undefined), {
+  assert.deepEqual(await handler('subscriptions-auth/speed', { sessionId: 's1' }, signal, undefined), {
     ok: true,
     value: { tier: 'standard', fastModels: [] },
   })
-  assert.deepEqual(await handler('setSpeed', { sessionId: 's1', tier: 'fast' }, signal, undefined), {
+  assert.deepEqual(await handler('subscriptions-auth/setSpeed', { sessionId: 's1', tier: 'fast' }, signal, undefined), {
     ok: true,
     value: { ok: true },
   })
-  assert.deepEqual(await handler('speed', { sessionId: 's1' }, signal, undefined), {
+  assert.deepEqual(await handler('subscriptions-auth/speed', { sessionId: 's1' }, signal, undefined), {
     ok: true,
     value: { tier: 'fast', fastModels: [] },
   })
   // Another session is unaffected; setting standard clears the entry.
-  assert.deepEqual(await handler('speed', { sessionId: 's2' }, signal, undefined), {
+  assert.deepEqual(await handler('subscriptions-auth/speed', { sessionId: 's2' }, signal, undefined), {
     ok: true,
     value: { tier: 'standard', fastModels: [] },
   })
-  await handler('setSpeed', { sessionId: 's1', tier: 'standard' }, signal, undefined)
-  assert.deepEqual(await handler('speed', { sessionId: 's1' }, signal, undefined), {
+  await handler('subscriptions-auth/setSpeed', { sessionId: 's1', tier: 'standard' }, signal, undefined)
+  assert.deepEqual(await handler('subscriptions-auth/speed', { sessionId: 's1' }, signal, undefined), {
     ok: true,
     value: { tier: 'standard', fastModels: [] },
   })
@@ -171,7 +171,7 @@ test('speed endpoints: per-session tier round trip and payload validation', asyn
     ['setSpeed', { sessionId: 's1', tier: 'ludicrous' }, /tier/],
   ] as const
   for (const [endpoint, payload, pattern] of bad) {
-    const result = await handler(endpoint, payload, signal, undefined)
+    const result = await handler(`subscriptions-auth/${endpoint}`, payload, signal, undefined)
     assert.equal(result.ok, false, JSON.stringify(payload))
     if (!result.ok) {
       assert.equal(result.error.code, 'bad-request')

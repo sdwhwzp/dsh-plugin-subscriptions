@@ -472,7 +472,7 @@ async function mountPlugin(): Promise<ConnectionRpcHandler> {
   ctx.provide('llm', { registerAdapter: () => Object.assign(() => {}, { replace: () => {} }) })
   ctx.provide('connection', {
     rpc: {
-      handle: (_channel: string, h: ConnectionRpcHandler) => {
+      intercept: (_channel: string, _matches: (endpoint: string) => boolean, h: ConnectionRpcHandler) => {
         handler = h
         return () => Promise.resolve()
       },
@@ -480,7 +480,7 @@ async function mountPlugin(): Promise<ConnectionRpcHandler> {
   })
   ctx.plugin(plugin, { providers: ['codex'] })
   await new Promise(resolve => setTimeout(resolve, 50))
-  assert.ok(handler !== undefined, 'the /subscriptions-auth channel was registered')
+  assert.ok(handler !== undefined, 'the /api/subscriptions-auth/* endpoints were registered')
   return handler
 }
 
@@ -503,23 +503,23 @@ test('auth RPC: status / login / cancel round trip', async () => {
     // consumes, without needing a credential reader injected anywhere.
     const handler = await mountPlugin()
 
-    const before = okValue<StatusValue>(await handler('status', {}, signal(), undefined), 'status')
+    const before = okValue<StatusValue>(await handler('subscriptions-auth/status', {}, signal(), undefined), 'status')
     assert.equal(before.providers.codex.loggedIn, false)
     assert.equal(before.providers.codex.busy, false)
 
     try {
       const login = okValue<{ authorizeUrl: string }>(
-        await handler('login', { provider: 'codex' }, signal(), undefined), 'login',
+        await handler('subscriptions-auth/login', { provider: 'codex' }, signal(), undefined), 'login',
       )
       assert.ok(login.authorizeUrl.startsWith('https://'), 'login returns an authorize URL')
 
-      const during = okValue<StatusValue>(await handler('status', {}, signal(), undefined), 'status while busy')
+      const during = okValue<StatusValue>(await handler('subscriptions-auth/status', {}, signal(), undefined), 'status while busy')
       assert.equal(during.providers.codex.busy, true)
     } finally {
-      okValue(await handler('cancel', { provider: 'codex' }, signal(), undefined), 'cancel')
+      okValue(await handler('subscriptions-auth/cancel', { provider: 'codex' }, signal(), undefined), 'cancel')
     }
 
-    const after = okValue<StatusValue>(await handler('status', {}, signal(), undefined), 'status after cancel')
+    const after = okValue<StatusValue>(await handler('subscriptions-auth/status', {}, signal(), undefined), 'status after cancel')
     assert.equal(after.providers.codex.busy, false)
   })
 })
@@ -527,7 +527,7 @@ test('auth RPC: status / login / cancel round trip', async () => {
 test('auth RPC: an unknown provider is rejected, not dispatched', async () => {
   await inIsolatedHome(async () => {
     const handler = await mountPlugin()
-    const result = await handler('login', { provider: 'gemini' }, signal(), undefined)
+    const result = await handler('subscriptions-auth/login', { provider: 'gemini' }, signal(), undefined)
     assert.equal(result.ok, false)
     if (!result.ok) assert.equal(result.error.code, 'bad-request')
   })

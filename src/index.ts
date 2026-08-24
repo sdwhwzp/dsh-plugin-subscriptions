@@ -1,7 +1,7 @@
 /**
  * dsh-plugin-subscriptions: register OAuth-subscription LLM providers
- * (ChatGPT/Codex, Claude, Grok) on `ctx.llm`, and expose the `/subscriptions-auth`
- * RPC channel the web Settings page uses to run the logins. The token store
+ * (ChatGPT/Codex, Claude, Grok) on `ctx.llm`, and expose `/api/subscriptions-auth/*`
+ * RPC endpoints the web Settings page uses to run the logins. The token store
  * lives at `~/.dsh/plugins/subscriptions/auth.json`; the channel registers only when
  * a host `connection` service exists, so headless compositions load fine.
  * @module dsh-plugin-subscriptions
@@ -174,7 +174,7 @@ function accountOf(provider: ProviderId, session: StoredSession | undefined): st
 type UsageFetchers = Partial<Record<ProviderId, (signal: AbortSignal) => Promise<ProviderUsage>>>
 
 /**
- * Auth operations behind the `/subscriptions-auth` RPC channel: start/complete
+ * Auth operations behind the `/api/subscriptions-auth/*` RPC endpoints: start/complete
  * OAuth attempts in the background, feed pasted codes, cancel, log out, and
  * answer usage lookups.
  *

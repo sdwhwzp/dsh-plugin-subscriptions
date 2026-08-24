@@ -4,7 +4,7 @@
  * and after settling; a settled result with image blocks renders them through
  * this plugin's own ImageGallery (harness rc.8 stopped exporting the platform
  * one as a package value), whose bytes load through the node half's
- * `/subscriptions-auth` RPC channel (the durable ImageAttachmentRef is never
+ * `/api/subscriptions-auth/*` RPC endpoints (the durable ImageAttachmentRef is never
  * a fetchable URL on its own). A text-only settled result (degraded route)
  * renders its text; an error result renders the first error line.
  *
@@ -23,7 +23,8 @@ import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
 
 /** Logical RPC channel served by the node half of this plugin. */
-const SUBSCRIPTIONS_AUTH_CHANNEL = '/subscriptions-auth'
+const SUBSCRIPTIONS_AUTH_CHANNEL = '/api'
+const SUBSCRIPTIONS_AUTH_PREFIX = 'subscriptions-auth/'
 
 /** Title prompt truncation budget (characters). */
 const PROMPT_MAX_LENGTH = 60
@@ -47,7 +48,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 
 /** Injected dependencies of {@link ImageGenerateToolview} (slot `inject`). */
 export interface ImageGenerateToolviewInjected {
-  /** Session-authorized image URL loader riding the `/subscriptions-auth` channel. */
+  /** Session-authorized image URL loader riding the `/api/subscriptions-auth/*` endpoints. */
   load: ImageLoader
 }
 
@@ -67,14 +68,18 @@ interface ImageEndpointResult {
 }
 
 /**
- * Call one `/subscriptions-auth` endpoint and unwrap the business result.
+ * Call one `/api/subscriptions-auth/*` endpoint and unwrap the business result.
  * @param rpc - Connection RPC caller.
  * @param endpoint - channel-relative endpoint.
  * @param payload - channel-owned request payload.
  * @returns the success value, cast by the caller to the endpoint's shape.
  */
 async function callSubscriptionsAuth<T>(rpc: ConnectionHandle['rpc'], endpoint: string, payload: unknown): Promise<T> {
-  const result: RpcResult<unknown> = await rpc.call(SUBSCRIPTIONS_AUTH_CHANNEL, endpoint, payload)
+  const result: RpcResult<unknown> = await rpc.call(
+    SUBSCRIPTIONS_AUTH_CHANNEL,
+    `${SUBSCRIPTIONS_AUTH_PREFIX}${endpoint}`,
+    payload,
+  )
   if (!result.ok) throw new Error(result.error.message)
   return result.value as T
 }

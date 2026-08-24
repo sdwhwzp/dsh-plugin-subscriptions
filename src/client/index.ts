@@ -1,7 +1,7 @@
 /**
  * Subscription OAuth login page, browser half. Registers the Subscriptions
  * settings section; every login state fact arrives through the node half's
- * `/subscriptions-auth` RPC channel — this plugin holds no credential state of its
+ * `/api/subscriptions-auth/*` RPC endpoints — this plugin holds no credential state of its
  * own. Section copy rides the client locale service: one 'settings.subscriptions'
  * namespace with zh/en dictionaries, rebound per read so the nav label and
  * page text follow the active locale.
@@ -48,7 +48,7 @@ const NS = 'settings.subscriptions'
 
 /**
  * Required services (cordis fiber inject): `slots` carries the registration
- * seat, `connection` the `/subscriptions-auth` RPC caller, and `locale` the copy
+ * seat, `connection` the `/api/subscriptions-auth/*` RPC caller, and `locale` the copy
  * dictionaries.
  */
 export const inject = ['slots', 'connection', 'locale']

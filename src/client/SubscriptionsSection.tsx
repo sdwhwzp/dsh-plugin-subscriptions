@@ -1,7 +1,7 @@
 /**
  * Subscriptions settings section: one card per subscription provider with an
- * OAuth login/logout flow driven by the node half's `/subscriptions-auth` RPC
- * channel. Login state lives server-side; the page polls `status` only while
+ * OAuth login/logout flow driven by the node half's `/api/subscriptions-auth/*`
+ * RPC endpoints. Login state lives server-side; the page polls `status` only while
  * a login attempt is busy, so an idle page never polls. All state is local
  * React state — the page has no store.
  *
@@ -18,8 +18,11 @@ import type { ConnectionHandle, RpcResult } from '@deepseek-ai/dsh-api-remotes/c
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
 
-/** Logical RPC channel served by the node half of this plugin. */
-const SUBSCRIPTIONS_AUTH_CHANNEL = '/subscriptions-auth'
+/** Authenticated shared RPC channel served by the Host connection. */
+const SUBSCRIPTIONS_AUTH_CHANNEL = '/api'
+
+/** Endpoint prefix owned by the node half of this plugin. */
+const SUBSCRIPTIONS_AUTH_PREFIX = 'subscriptions-auth/'
 
 /** Poll cadence while a provider login attempt is busy. */
 const POLL_INTERVAL_MS = 2000
@@ -83,11 +86,11 @@ const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [
   { id: 'grok', name: 'Grok (X Premium)' },
 ]
 
-/** Business error returned by the `/subscriptions-auth` channel (error branch message). */
+/** Business error returned by a `/api/subscriptions-auth/*` endpoint. */
 class SubscriptionsAuthError extends Error {}
 
 /**
- * Call one `/subscriptions-auth` endpoint and unwrap the business result.
+ * Call one `/api/subscriptions-auth/*` endpoint and unwrap the business result.
  * Shared by the settings section and the composer Speed toggle.
  * @param rpc - Connection RPC caller.
  * @param endpoint - channel-relative endpoint.
@@ -97,7 +100,7 @@ class SubscriptionsAuthError extends Error {}
 export async function callSubscriptionsAuth<T>(rpc: ConnectionHandle['rpc'], endpoint: string, payload: unknown): Promise<T> {
   let result: RpcResult<unknown>
   try {
-    result = await rpc.call(SUBSCRIPTIONS_AUTH_CHANNEL, endpoint, payload)
+    result = await rpc.call(SUBSCRIPTIONS_AUTH_CHANNEL, `${SUBSCRIPTIONS_AUTH_PREFIX}${endpoint}`, payload)
   } catch (error) {
     // The transport rejected rather than answering; surface the same way.
     throw new SubscriptionsAuthError(error instanceof Error ? error.message : String(error))
