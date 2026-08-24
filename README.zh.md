@@ -44,7 +44,11 @@
 
 只有已登录的 provider 才会出现在会话模型选择器里;登录/退出后列表自动刷新。支持视觉的模型会声明 `['text', 'image']` 输入模态,图片内容会被翻译成各 provider 的 wire 格式。
 
+Codex 实时模型发现不可用时,内置兜底目录仍包含 GPT-5.5、GPT-5.4、GPT-5.4 Mini 和 GPT-5.3 Codex Spark,确保这些模型上报的 Token 用量仍能进入会话计费统计。
+
 已登录的卡片还会显示**订阅用量**——按限额窗口(5 小时会话窗、每周窗,以及计划包含的按模型每周窗)展示已用百分比、进度条和重置时间,并带刷新按钮。Codex 用量来自 `chatgpt.com/backend-api/wham/usage`(同时报告计划类型),Claude 用量来自 `api.anthropic.com/api/oauth/usage`,Grok 用量来自 Grok Build CLI 代理的 `cli-chat-proxy.grok.com/v1/billing`(即 CLI `/usage` 面板的数据源,报告共享每周额度和订阅档位)。
+
+宿主提供已认证账号角色时,服务商级订阅用量仅管理员可见。子账号仍可使用宿主分配的模型,但浏览器不会请求或显示服务商额度,直接调用 `usage` RPC 也会被服务端拒绝。
 
 随 provider 启用自动注册的工具:
 

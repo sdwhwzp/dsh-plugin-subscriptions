@@ -39,6 +39,7 @@ export interface ProviderStatus {
 /** `status` endpoint value: the node half owns this shape. */
 interface StatusResponse {
   providers: Record<SubscriptionProvider, ProviderStatus>
+  canViewUsage: boolean
 }
 
 /** One rate-limit window as answered by the `usage` endpoint. */
@@ -239,6 +240,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const { rpc } = props
   const t = props.t ?? fallbackTranslate
   const [statuses, setStatuses] = useState<Partial<Record<SubscriptionProvider, ProviderStatus>>>({})
+  const [canViewUsage, setCanViewUsage] = useState(false)
   const [errors, setErrors] = useState<Partial<Record<SubscriptionProvider, string>>>({})
   const [manualDrafts, setManualDrafts] = useState<Record<SubscriptionProvider, string>>({
     codex: '', claude: '', grok: '',
@@ -282,6 +284,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     }
     if (!mountedRef.current) return
     setStatuses(response.providers)
+    setCanViewUsage(response.canViewUsage)
     for (const { id } of PROVIDERS) {
       const status = response.providers[id]
       if (status.loggedIn || !status.busy) stopPolling(id)
@@ -314,7 +317,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   }, [refresh, startPolling])
 
   const loadUsage = useCallback(async (provider: SubscriptionProvider): Promise<void> => {
-    if (rpc === undefined || usageInflightRef.current.has(provider)) return
+    if (!canViewUsage || rpc === undefined || usageInflightRef.current.has(provider)) return
     usageInflightRef.current.add(provider)
     setUsageLoading(prev => ({ ...prev, [provider]: true }))
     try {
@@ -332,12 +335,17 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       usageInflightRef.current.delete(provider)
       if (mountedRef.current) setUsageLoading(prev => ({ ...prev, [provider]: false }))
     }
-  }, [rpc])
+  }, [rpc, canViewUsage])
 
   // Fetch usage once a provider is logged in; drop the cached snapshot on
   // logout so a re-login refetches. A failed lookup does not auto-retry — the
   // per-card Refresh button is the retry path.
   useEffect(() => {
+    if (!canViewUsage) {
+      if (Object.keys(usages).length > 0) setUsages({})
+      if (Object.keys(usageErrors).length > 0) setUsageErrors({})
+      return
+    }
     for (const { id } of PROVIDERS) {
       const status = statuses[id]
       if (status === undefined) continue
@@ -356,7 +364,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
         })
       }
     }
-  }, [statuses, usages, usageErrors, loadUsage])
+  }, [statuses, usages, usageErrors, loadUsage, canViewUsage])
 
   const login = useCallback(async (provider: SubscriptionProvider): Promise<void> => {
     if (rpc === undefined) return
@@ -431,7 +439,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
         const usage = usages[id]
         const usageError = usageErrors[id]
         // Providers without a usage endpoint answer supported:false — no block.
-        const showUsage = status?.loggedIn === true && usage?.supported !== false
+        const showUsage = canViewUsage && status?.loggedIn === true && usage?.supported !== false
           && (usage !== undefined || usageError !== undefined || usageLoading[id] === true)
         return (
           <div key={id} style={styles.card}>

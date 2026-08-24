@@ -10,6 +10,7 @@ import type { HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
 import type { RpcResult } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import type { AuthenticatedPrincipal } from '@deepseek-ai/dsh-llm'
 import { PROVIDER_IDS, type ProviderId } from './store.js'
 import type { ProviderUsage } from '../providers/common.js'
 
@@ -115,6 +116,9 @@ export interface AuthController {
 /** Payload carried no usable provider id — an RPC client bug, not a server failure. */
 class BadRequest extends Error {}
 
+/** A subaccount may use subscription models but cannot inspect the owner's provider quota. */
+class UsageForbidden extends Error {}
+
 function ok(value: unknown): RpcResult<unknown> {
   return { ok: true, value }
 }
@@ -126,6 +130,16 @@ function failure(error: unknown): RpcResult<unknown> {
     return { ok: false, error: { code: 'bad-request', message, details: { issues: [] } } }
   }
   return { ok: false, error: { code: 'internal', message, details: {} } }
+}
+
+/** Whether this verified caller may inspect provider-level subscription quota. */
+function canViewUsage(principal: AuthenticatedPrincipal | undefined): boolean {
+  return principal?.role !== 'user'
+}
+
+/** Reject direct usage RPC calls from a verified subaccount. */
+function assertCanViewUsage(principal: AuthenticatedPrincipal | undefined): void {
+  if (!canViewUsage(principal)) throw new UsageForbidden('subscription usage is available only to administrators')
 }
 
 function readProvider(payload: unknown): ProviderId {
@@ -212,13 +226,14 @@ async function dispatch(
   endpoint: string,
   payload: unknown,
   signal: AbortSignal,
+  principal: AuthenticatedPrincipal | undefined,
 ): Promise<RpcResult<unknown>> {
   switch (endpoint) {
     case 'status': {
       const entries = await Promise.all(PROVIDER_IDS.map(
         async provider => [provider, await controller.status(provider)] as const,
       ))
-      return ok({ providers: Object.fromEntries(entries) })
+      return ok({ providers: Object.fromEntries(entries), canViewUsage: canViewUsage(principal) })
     }
     case 'login':
       return ok(await controller.login(readProvider(payload)))
@@ -234,6 +249,7 @@ async function dispatch(
       await controller.logout(readProvider(payload))
       return ok({ ok: true })
     case 'usage':
+      assertCanViewUsage(principal)
       return ok(await controller.usage(readProvider(payload), signal))
     case 'image':
       return ok(await controller.readImage(readImageRef(payload), signal))
@@ -264,9 +280,9 @@ export function registerAuthRpc(ctx: Context, controller: AuthController, speed:
     ctx.effect(
       () => connection.rpc.handle(
         SUBSCRIPTIONS_AUTH_CHANNEL,
-        async (endpoint, payload, signal) => {
+        async (endpoint, payload, signal, principal) => {
           try {
-            return await dispatch(controller, speed, endpoint, payload, signal)
+            return await dispatch(controller, speed, endpoint, payload, signal, principal)
           } catch (error) {
             return failure(error)
           }

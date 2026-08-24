@@ -49,7 +49,7 @@ async function call(
   handler: ConnectionRpcHandler,
   payload: unknown,
 ): Promise<RpcResult<unknown>> {
-  return handler('image', payload, new AbortController().signal)
+  return handler('image', payload, new AbortController().signal, undefined)
 }
 
 test('image endpoint: base64 round trip through the attachment store', async () => {
@@ -113,7 +113,7 @@ test('video endpoint: base64 round trip from the videos directory', async () => 
   mkdirSync(videosDir, { recursive: true })
   writeFileSync(join(videosDir, 'clip.mp4'), Buffer.from('hi'))
   const handler = await mount()
-  const result = await handler('video', { name: 'clip.mp4' }, new AbortController().signal)
+  const result = await handler('video', { name: 'clip.mp4' }, new AbortController().signal, undefined)
   assert.deepEqual(result, { ok: true, value: { mediaType: 'video/mp4', dataBase64: 'aGk=' } })
 })
 
@@ -128,11 +128,11 @@ test('video endpoint: name validation and missing file', async () => {
     'nope',
   ]
   for (const payload of bad) {
-    const result = await handler('video', payload, new AbortController().signal)
+    const result = await handler('video', payload, new AbortController().signal, undefined)
     assert.equal(result.ok, false, JSON.stringify(payload))
     if (!result.ok) assert.equal(result.error.code, 'bad-request')
   }
-  const missing = await handler('video', { name: 'absent.mp4' }, new AbortController().signal)
+  const missing = await handler('video', { name: 'absent.mp4' }, new AbortController().signal, undefined)
   assert.equal(missing.ok, false)
   if (!missing.ok) assert.equal(missing.error.code, 'internal')
 })
@@ -141,25 +141,25 @@ test('speed endpoints: per-session tier round trip and payload validation', asyn
   const handler = await mount()
   const signal = new AbortController().signal
   // Logged out and undiscovered: standard tier, no fast-capable models.
-  assert.deepEqual(await handler('speed', { sessionId: 's1' }, signal), {
+  assert.deepEqual(await handler('speed', { sessionId: 's1' }, signal, undefined), {
     ok: true,
     value: { tier: 'standard', fastModels: [] },
   })
-  assert.deepEqual(await handler('setSpeed', { sessionId: 's1', tier: 'fast' }, signal), {
+  assert.deepEqual(await handler('setSpeed', { sessionId: 's1', tier: 'fast' }, signal, undefined), {
     ok: true,
     value: { ok: true },
   })
-  assert.deepEqual(await handler('speed', { sessionId: 's1' }, signal), {
+  assert.deepEqual(await handler('speed', { sessionId: 's1' }, signal, undefined), {
     ok: true,
     value: { tier: 'fast', fastModels: [] },
   })
   // Another session is unaffected; setting standard clears the entry.
-  assert.deepEqual(await handler('speed', { sessionId: 's2' }, signal), {
+  assert.deepEqual(await handler('speed', { sessionId: 's2' }, signal, undefined), {
     ok: true,
     value: { tier: 'standard', fastModels: [] },
   })
-  await handler('setSpeed', { sessionId: 's1', tier: 'standard' }, signal)
-  assert.deepEqual(await handler('speed', { sessionId: 's1' }, signal), {
+  await handler('setSpeed', { sessionId: 's1', tier: 'standard' }, signal, undefined)
+  assert.deepEqual(await handler('speed', { sessionId: 's1' }, signal, undefined), {
     ok: true,
     value: { tier: 'standard', fastModels: [] },
   })
@@ -171,7 +171,7 @@ test('speed endpoints: per-session tier round trip and payload validation', asyn
     ['setSpeed', { sessionId: 's1', tier: 'ludicrous' }, /tier/],
   ] as const
   for (const [endpoint, payload, pattern] of bad) {
-    const result = await handler(endpoint, payload, signal)
+    const result = await handler(endpoint, payload, signal, undefined)
     assert.equal(result.ok, false, JSON.stringify(payload))
     if (!result.ok) {
       assert.equal(result.error.code, 'bad-request')

@@ -503,23 +503,23 @@ test('auth RPC: status / login / cancel round trip', async () => {
     // consumes, without needing a credential reader injected anywhere.
     const handler = await mountPlugin()
 
-    const before = okValue<StatusValue>(await handler('status', {}, signal()), 'status')
+    const before = okValue<StatusValue>(await handler('status', {}, signal(), undefined), 'status')
     assert.equal(before.providers.codex.loggedIn, false)
     assert.equal(before.providers.codex.busy, false)
 
     try {
       const login = okValue<{ authorizeUrl: string }>(
-        await handler('login', { provider: 'codex' }, signal()), 'login',
+        await handler('login', { provider: 'codex' }, signal(), undefined), 'login',
       )
       assert.ok(login.authorizeUrl.startsWith('https://'), 'login returns an authorize URL')
 
-      const during = okValue<StatusValue>(await handler('status', {}, signal()), 'status while busy')
+      const during = okValue<StatusValue>(await handler('status', {}, signal(), undefined), 'status while busy')
       assert.equal(during.providers.codex.busy, true)
     } finally {
-      okValue(await handler('cancel', { provider: 'codex' }, signal()), 'cancel')
+      okValue(await handler('cancel', { provider: 'codex' }, signal(), undefined), 'cancel')
     }
 
-    const after = okValue<StatusValue>(await handler('status', {}, signal()), 'status after cancel')
+    const after = okValue<StatusValue>(await handler('status', {}, signal(), undefined), 'status after cancel')
     assert.equal(after.providers.codex.busy, false)
   })
 })
@@ -527,7 +527,7 @@ test('auth RPC: status / login / cancel round trip', async () => {
 test('auth RPC: an unknown provider is rejected, not dispatched', async () => {
   await inIsolatedHome(async () => {
     const handler = await mountPlugin()
-    const result = await handler('login', { provider: 'gemini' }, signal())
+    const result = await handler('login', { provider: 'gemini' }, signal(), undefined)
     assert.equal(result.ok, false)
     if (!result.ok) assert.equal(result.error.code, 'bad-request')
   })
