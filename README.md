@@ -48,7 +48,7 @@ If live Codex model discovery is unavailable, the built-in fallback catalog incl
 
 Logged-in cards also show **subscription usage** — per rate-limit window (5-hour session, weekly, and per-model weekly where the plan has one) with the used percentage, a progress bar, and the reset time, plus a Refresh button. Codex usage comes from `chatgpt.com/backend-api/wham/usage` (also reports the plan), Claude usage from `api.anthropic.com/api/oauth/usage`, and Grok usage from the Grok Build CLI proxy's `cli-chat-proxy.grok.com/v1/billing` (the source of the CLI's `/usage` panel; reports the shared weekly pool and the subscription tier).
 
-Provider-level subscription usage is administrator-only when the host supplies authenticated account roles. Subaccounts can use the models assigned by the host, but the browser does not request or render provider quota data, and direct `usage` RPC calls are rejected on the server.
+Provider credentials and provider-level subscription usage are administrator-only when the host supplies authenticated account roles. Subaccounts can use the models assigned by the host, but the browser does not render login, logout, manual authorization, or provider quota controls. Direct credential-management and `usage` RPC calls are also rejected on the server.
 
 Also included, registered when the matching provider is enabled:
 

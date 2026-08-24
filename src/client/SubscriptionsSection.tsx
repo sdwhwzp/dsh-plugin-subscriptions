@@ -43,6 +43,7 @@ export interface ProviderStatus {
 interface StatusResponse {
   providers: Record<SubscriptionProvider, ProviderStatus>
   canViewUsage: boolean
+  canManageCredentials: boolean
 }
 
 /** One rate-limit window as answered by the `usage` endpoint. */
@@ -244,6 +245,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const t = props.t ?? fallbackTranslate
   const [statuses, setStatuses] = useState<Partial<Record<SubscriptionProvider, ProviderStatus>>>({})
   const [canViewUsage, setCanViewUsage] = useState(false)
+  const [canManageCredentials, setCanManageCredentials] = useState(false)
   const [errors, setErrors] = useState<Partial<Record<SubscriptionProvider, string>>>({})
   const [manualDrafts, setManualDrafts] = useState<Record<SubscriptionProvider, string>>({
     codex: '', claude: '', grok: '',
@@ -288,6 +290,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     if (!mountedRef.current) return
     setStatuses(response.providers)
     setCanViewUsage(response.canViewUsage)
+    setCanManageCredentials(response.canManageCredentials)
     for (const { id } of PROVIDERS) {
       const status = response.providers[id]
       if (status.loggedIn || !status.busy) stopPolling(id)
@@ -455,23 +458,25 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
               <p style={styles.statusLine}>{status.detail}</p>
             )}
             {errors[id] !== undefined && <p style={styles.errorLine}>{errors[id]}</p>}
-            <div style={styles.actions}>
-              {!busy && status?.loggedIn !== true && (
-                <button type="button" style={styles.button} onClick={() => { void login(id) }}>
-                  {t('login')}
-                </button>
-              )}
-              {busy && (
-                <button type="button" style={styles.button} onClick={() => { void cancel(id) }}>
-                  {t('cancel')}
-                </button>
-              )}
-              {status?.loggedIn === true && (
-                <button type="button" style={styles.button} onClick={() => { void logout(id, name) }}>
-                  {t('logout')}
-                </button>
-              )}
-            </div>
+            {canManageCredentials && (
+              <div style={styles.actions}>
+                {!busy && status?.loggedIn !== true && (
+                  <button type="button" style={styles.button} onClick={() => { void login(id) }}>
+                    {t('login')}
+                  </button>
+                )}
+                {busy && (
+                  <button type="button" style={styles.button} onClick={() => { void cancel(id) }}>
+                    {t('cancel')}
+                  </button>
+                )}
+                {status?.loggedIn === true && (
+                  <button type="button" style={styles.button} onClick={() => { void logout(id, name) }}>
+                    {t('logout')}
+                  </button>
+                )}
+              </div>
+            )}
             {showUsage && (
               <div style={styles.usage}>
                 <div style={styles.usageHeader}>
@@ -517,7 +522,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                 })}
               </div>
             )}
-            {busy && (
+            {canManageCredentials && busy && (
               <details style={styles.manual}>
                 <summary>{t('manualSummary')}</summary>
                 <div style={styles.manualRow}>

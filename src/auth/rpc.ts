@@ -119,8 +119,8 @@ export interface AuthController {
 /** Payload carried no usable provider id — an RPC client bug, not a server failure. */
 class BadRequest extends Error {}
 
-/** A subaccount may use subscription models but cannot inspect the owner's provider quota. */
-class UsageForbidden extends Error {}
+/** A subaccount may use assigned models but cannot inspect or mutate the owner's subscription. */
+class AdminForbidden extends Error {}
 
 function ok(value: unknown): RpcResult<unknown> {
   return { ok: true, value }
@@ -140,9 +140,21 @@ function canViewUsage(principal: AuthenticatedPrincipal | undefined): boolean {
   return principal?.role !== 'user'
 }
 
+/** Whether this verified caller may change provider login credentials. */
+function canManageCredentials(principal: AuthenticatedPrincipal | undefined): boolean {
+  return principal?.role !== 'user'
+}
+
 /** Reject direct usage RPC calls from a verified subaccount. */
 function assertCanViewUsage(principal: AuthenticatedPrincipal | undefined): void {
-  if (!canViewUsage(principal)) throw new UsageForbidden('subscription usage is available only to administrators')
+  if (!canViewUsage(principal)) throw new AdminForbidden('subscription usage is available only to administrators')
+}
+
+/** Reject provider credential mutations from a verified subaccount. */
+function assertCanManageCredentials(principal: AuthenticatedPrincipal | undefined): void {
+  if (!canManageCredentials(principal)) {
+    throw new AdminForbidden('subscription login is available only to administrators')
+  }
 }
 
 function readProvider(payload: unknown): ProviderId {
@@ -236,19 +248,27 @@ async function dispatch(
       const entries = await Promise.all(PROVIDER_IDS.map(
         async provider => [provider, await controller.status(provider)] as const,
       ))
-      return ok({ providers: Object.fromEntries(entries), canViewUsage: canViewUsage(principal) })
+      return ok({
+        providers: Object.fromEntries(entries),
+        canViewUsage: canViewUsage(principal),
+        canManageCredentials: canManageCredentials(principal),
+      })
     }
     case 'login':
+      assertCanManageCredentials(principal)
       return ok(await controller.login(readProvider(payload)))
     case 'manual': {
+      assertCanManageCredentials(principal)
       const provider = readProvider(payload)
       await controller.manual(provider, readString(payload, 'input'))
       return ok({ ok: true })
     }
     case 'cancel':
+      assertCanManageCredentials(principal)
       await controller.cancel(readProvider(payload))
       return ok({ ok: true })
     case 'logout':
+      assertCanManageCredentials(principal)
       await controller.logout(readProvider(payload))
       return ok({ ok: true })
     case 'usage':

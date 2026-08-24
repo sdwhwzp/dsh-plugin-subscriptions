@@ -301,7 +301,11 @@ test('usage endpoint: subaccounts cannot inspect provider quota', async () => {
   const child = { source: 'dsh-passwords', id: '2', username: 'child', role: 'user' } as const
   const status = await handler('subscriptions-auth/status', {}, signal, child)
   assert.equal(status.ok, true)
-  if (status.ok) assert.equal((status.value as { canViewUsage: boolean }).canViewUsage, false)
+  if (status.ok) {
+    const permissions = status.value as { canViewUsage: boolean; canManageCredentials: boolean }
+    assert.equal(permissions.canViewUsage, false)
+    assert.equal(permissions.canManageCredentials, false)
+  }
 
   const result = await handler('subscriptions-auth/usage', { provider: 'codex' }, signal, child)
   assert.equal(result.ok, false)
@@ -314,7 +318,11 @@ test('usage endpoint: administrators retain provider quota access', async () => 
   const admin = { source: 'dsh-passwords', id: '1', username: 'owner', role: 'admin' } as const
   const status = await handler('subscriptions-auth/status', {}, signal, admin)
   assert.equal(status.ok, true)
-  if (status.ok) assert.equal((status.value as { canViewUsage: boolean }).canViewUsage, true)
+  if (status.ok) {
+    const permissions = status.value as { canViewUsage: boolean; canManageCredentials: boolean }
+    assert.equal(permissions.canViewUsage, true)
+    assert.equal(permissions.canManageCredentials, true)
+  }
 
   const result = await handler('subscriptions-auth/usage', { provider: 'grok' }, signal, admin)
   assert.deepEqual(result, { ok: true, value: { supported: false } })

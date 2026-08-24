@@ -532,3 +532,22 @@ test('auth RPC: an unknown provider is rejected, not dispatched', async () => {
     if (!result.ok) assert.equal(result.error.code, 'bad-request')
   })
 })
+
+test('auth RPC: subaccounts cannot change provider credentials', async () => {
+  await inIsolatedHome(async () => {
+    const handler = await mountPlugin()
+    const child = { source: 'dsh-passwords', id: '2', username: 'child', role: 'user' } as const
+    const requests = [
+      ['login', { provider: 'codex' }],
+      ['manual', { provider: 'codex', input: 'callback-code' }],
+      ['cancel', { provider: 'codex' }],
+      ['logout', { provider: 'codex' }],
+    ] as const
+
+    for (const [endpoint, payload] of requests) {
+      const result = await handler(`subscriptions-auth/${endpoint}`, payload, signal(), child)
+      assert.equal(result.ok, false, endpoint)
+      if (!result.ok) assert.match(result.error.message, /only to administrators/, endpoint)
+    }
+  })
+})
