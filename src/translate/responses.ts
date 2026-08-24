@@ -5,6 +5,7 @@
  * state machine ({@link ResponsesStreamTranslator}) so tests need no streams.
  */
 
+import { createHash } from 'node:crypto'
 import {
   CallId,
   CONTEXT_WINDOW_EXCEEDED_CODE,
@@ -32,6 +33,44 @@ export interface ResponsesRequestInput {
   input: Record<string, unknown>[]
 }
 
+const RESPONSES_CALL_ID_MAX_LENGTH = 64
+const RESPONSES_MAPPED_CALL_ID_PREFIX = 'dsh_'
+
+/** Hash one harness call id into a short Responses-safe identifier. */
+function mappedResponsesCallId(callId: string, attempt: number): string {
+  const hash = createHash('sha256')
+  if (attempt > 0) hash.update(`${attempt}\0`)
+  hash.update(callId)
+  return `${RESPONSES_MAPPED_CALL_ID_PREFIX}${hash.digest('base64url')}`
+}
+
+/**
+ * Build one request-scoped call-id mapper. Responses rejects identifiers over
+ * 64 characters, while other providers can persist longer opaque identifiers.
+ * The reverse map also prevents a pre-existing short id from colliding with a
+ * generated id in the same request.
+ */
+function createResponsesCallIdMapper(): (callId: string) => string {
+  const mappedByOriginal = new Map<string, string>()
+  const originalByMapped = new Map<string, string>()
+  return (callId: string): string => {
+    const existing = mappedByOriginal.get(callId)
+    if (existing !== undefined) return existing
+
+    let attempt = 0
+    let mapped = callId.length <= RESPONSES_CALL_ID_MAX_LENGTH
+      ? callId
+      : mappedResponsesCallId(callId, attempt)
+    while (originalByMapped.has(mapped) && originalByMapped.get(mapped) !== callId) {
+      attempt += 1
+      mapped = mappedResponsesCallId(callId, attempt)
+    }
+    mappedByOriginal.set(callId, mapped)
+    originalByMapped.set(mapped, callId)
+    return mapped
+  }
+}
+
 /** Flatten a tool result's content to plain text for `function_call_output`. */
 function toolResultText(block: ToolResultBlock): string {
   return block.content.map(part => (part.type === 'text' ? part.text : '')).join('')
@@ -50,6 +89,7 @@ function toolResultText(block: ToolResultBlock): string {
 export function toResponsesInput(messages: readonly TranslatableMessage[], system?: string): ResponsesRequestInput {
   const input: Record<string, unknown>[] = []
   const systemTexts: string[] = []
+  const mapCallId = createResponsesCallIdMapper()
   for (const message of messages) {
     if (message.role === 'system') {
       for (const block of message.content) {
@@ -73,7 +113,7 @@ export function toResponsesInput(messages: readonly TranslatableMessage[], syste
           flushMessage()
           input.push({
             type: 'function_call',
-            call_id: String(block.id),
+            call_id: mapCallId(String(block.id)),
             name: block.name,
             arguments: block.arguments,
           })
@@ -82,7 +122,7 @@ export function toResponsesInput(messages: readonly TranslatableMessage[], syste
           flushMessage()
           input.push({
             type: 'function_call_output',
-            call_id: String(block.toolCallId),
+            call_id: mapCallId(String(block.toolCallId)),
             output: toolResultText(block),
           })
           break

@@ -75,6 +75,40 @@ test('toResponsesInput: text, tool call, and tool result round trip', () => {
   ])
 })
 
+test('toResponsesInput: long tool call ids are shortened and preserve result pairing', () => {
+  const longCallId = 'call_1AMlFpwK2lhf324QHBWwQCTmR8WYQc1z|fc_1AMlFpwK2lhf324QHBWwQCTmR8WYQc1z'
+  const { input } = toResponsesInput([
+    message('assistant', [toolCall(longCallId, 'bash', '{"cmd":"pwd"}')]),
+    message('user', [toolResult(longCallId, '/workspace')], { kind: 'tool', callId: CallId(longCallId) }),
+  ])
+
+  const callId = input[0].call_id
+  assert.equal(typeof callId, 'string')
+  assert.match(callId as string, /^dsh_[A-Za-z0-9_-]{43}$/)
+  assert.ok((callId as string).length <= 64)
+  assert.equal(input[1].call_id, callId)
+})
+
+test('toResponsesInput: generated call ids cannot collide with existing short ids', () => {
+  const longCallId = 'x'.repeat(65)
+  const generatedCallId = toResponsesInput([
+    message('assistant', [toolCall(longCallId, 'first', '{}')]),
+  ]).input[0].call_id as string
+
+  const { input } = toResponsesInput([
+    message('assistant', [
+      toolCall(generatedCallId, 'reserved', '{}'),
+      toolCall(longCallId, 'long', '{}'),
+    ]),
+    message('user', [toolResult(longCallId, 'done')], { kind: 'tool', callId: CallId(longCallId) }),
+  ])
+
+  assert.equal(input[0].call_id, generatedCallId)
+  assert.notEqual(input[1].call_id, generatedCallId)
+  assert.equal(input[2].call_id, input[1].call_id)
+  assert.ok((input[1].call_id as string).length <= 64)
+})
+
 test('toResponsesInput: system-role messages become instructions unless options.system wins', () => {
   const systemMessage = message('system', [{ type: 'text', text: 'from history' }])
   const fromMessages = toResponsesInput([systemMessage])
