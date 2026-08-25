@@ -49,6 +49,19 @@ const CODEX_DEFAULT_MAX_TOKENS = 128_000
 /** Refresh when the access token has less than this much life left. */
 export const CODEX_PREEMPT_MS = 5 * 60_000
 
+/** ChatGPT subscription models exposed in the picker and built-in fallback. */
+export const CODEX_PICKER_MODELS: readonly ModelEntry[] = [
+  { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol' },
+  { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra' },
+  { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna' },
+]
+const CODEX_PICKER_MODEL_IDS = new Set(CODEX_PICKER_MODELS.map(model => model.id))
+
+/** Keep only the current ChatGPT subscription models, including for persisted catalogs. */
+function pickerModels<Model extends { id: string }>(models: readonly Model[]): Model[] {
+  return models.filter(model => CODEX_PICKER_MODEL_IDS.has(model.id))
+}
+
 /** Default instruction when the request carries no system prompt. */
 const DEFAULT_CODEX_INSTRUCTIONS = 'You are Codex, a coding agent based on GPT-5. '
   + 'Help the user with their software engineering tasks.'
@@ -391,7 +404,7 @@ function supportsFastTier(entry: CodexWireModel): boolean {
  * Fetch the live codex model catalog with the session's auth headers.
  * @param session - the stored session (used as-is; never refreshed here).
  * @param fetchFn - fetch implementation (injectable for tests).
- * @returns discovered models: hidden entries dropped, sorted by priority.
+ * @returns current picker models: old and hidden entries dropped, sorted by priority.
  */
 export async function fetchCodexModels(session: CodexSession, fetchFn: FetchFn = fetch): Promise<DiscoveredModel[]> {
   const url = `${CODEX_MODELS_URL}?client_version=${CODEX_CLIENT_VERSION}`
@@ -410,6 +423,7 @@ export async function fetchCodexModels(session: CodexSession, fetchFn: FetchFn =
   const discovered: DiscoveredModel[] = []
   for (const entry of payload.models) {
     if (typeof entry.slug !== 'string' || entry.slug.length === 0) continue
+    if (!CODEX_PICKER_MODEL_IDS.has(entry.slug)) continue
     // codex-rs ModelVisibility: only "list" is picker-visible; hide/none are
     // dropped, and an absent or unknown value is included (in doubt, include).
     if (entry.visibility === 'hide' || entry.visibility === 'none') continue
@@ -445,11 +459,10 @@ export async function fetchCodexModels(session: CodexSession, fetchFn: FetchFn =
     discovered.push(model)
   }
   discovered.sort((a, b) => (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER))
-  // An empty catalog from a 200 response means the backend gated us out (e.g.
-  // client_version too old): surface it as a discovery failure so the adapter
-  // falls back to the static catalog instead of vanishing from the picker.
+  // No supported entries means the backend gated this client or has not
+  // advertised the current set. Fall back instead of hiding the provider.
   if (discovered.length === 0) {
-    throw new Error(`codex models endpoint returned an empty catalog (client_version ${CODEX_CLIENT_VERSION})`)
+    throw new Error(`codex models endpoint returned no picker-visible GPT-5.6 models (client_version ${CODEX_CLIENT_VERSION})`)
   }
   return discovered
 }
@@ -527,7 +540,7 @@ export class CodexAdapter extends LlmAdapter {
   }
 
   private staticModels(provider: string): LlmModelInfo[] {
-    return this.options.models.map(model => ({
+    return pickerModels(this.options.models).map(model => ({
       provider,
       id: model.id,
       name: model.name ?? model.id,
@@ -545,7 +558,13 @@ export class CodexAdapter extends LlmAdapter {
       // through the refresh-aware path so an expired access token renews here
       // instead of failing discovery into the static fallback.
       const discovered = await this.catalog.get(() => this.fetchCatalog())
-      return discovered.map(model => ({
+      const current = pickerModels(discovered)
+      if (current.length === 0) {
+        this.catalog.invalidate()
+        this.options.onWarn?.('codex cached catalog has no picker-visible GPT-5.6 models; using the built-in catalog')
+        return this.staticModels(provider)
+      }
+      return current.map(model => ({
         provider,
         id: model.id,
         name: model.name,
@@ -573,7 +592,7 @@ export class CodexAdapter extends LlmAdapter {
    * call — just because the TTL lapsed mid-turn.
    */
   private async discovered(model: string): Promise<DiscoveredModel | undefined> {
-    if (!this.options.discovery) return undefined
+    if (!this.options.discovery || !CODEX_PICKER_MODEL_IDS.has(model)) return undefined
     const models = await this.catalog.resolve(() => this.fetchCatalog())
     return models?.find(entry => entry.id === model)
   }
@@ -591,7 +610,7 @@ export class CodexAdapter extends LlmAdapter {
     const session = await this.options.tokens.peek()
     if (session === undefined) return []
     const models = await this.catalog.resolve(() => this.fetchCatalog())
-    return (models ?? []).filter(model => model.fastTier === true).map(model => model.id)
+    return pickerModels(models ?? []).filter(model => model.fastTier === true).map(model => model.id)
   }
 
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {

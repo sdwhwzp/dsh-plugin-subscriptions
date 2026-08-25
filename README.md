@@ -38,13 +38,13 @@ The `video_generate` tool plays the generated clip inline:
 
 | Route    | Subscription      | Models |
 |----------|-------------------|--------|
-| `codex`  | ChatGPT Plus/Pro  | live catalog from `chatgpt.com/backend-api/codex/models` |
+| `codex`  | ChatGPT Plus/Pro  | GPT-5.6 Sol, Terra, and Luna from the live catalog |
 | `claude` | Claude Pro/Max    | all models available in your subscription (Opus, Sonnet, Haiku, Fable — static catalog, updated with the plugin) |
 | `grok`   | X Premium (xAI)   | live catalog from `api.x.ai/v1/models` (chat models only); reasoning efforts from the Grok CLI catalog (`cli-chat-proxy.grok.com/v1/models`) |
 
 Only logged-in providers appear in the session model picker; the lists above refresh on login/logout. Vision-capable models declare `['text', 'image']` input modalities, and image content is translated to each provider's wire format.
 
-If live Codex model discovery is unavailable, the built-in fallback catalog includes GPT-5.5, GPT-5.4, GPT-5.4 Mini, and GPT-5.3 Codex Spark so their provider-reported token usage remains available to session accounting.
+The ChatGPT picker exposes only GPT-5.6 Sol, Terra, and Luna. Older entries are removed from live, persisted, configured, and fallback catalogs; Claude and Grok catalogs are unchanged.
 
 Logged-in cards also show **subscription usage** — per rate-limit window (5-hour session, weekly, and per-model weekly where the plan has one) with the used percentage, a progress bar, and the reset time, plus a Refresh button. Codex usage comes from `chatgpt.com/backend-api/wham/usage` (also reports the plan), Claude usage from `api.anthropic.com/api/oauth/usage`, and Grok usage from the Grok Build CLI proxy's `cli-chat-proxy.grok.com/v1/billing` (the source of the CLI's `/usage` panel; reports the shared weekly pool and the subscription tier).
 

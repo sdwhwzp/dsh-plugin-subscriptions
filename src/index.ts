@@ -47,6 +47,7 @@ import { catalogStore } from './providers/catalog-store.js'
 import {
   CodexAdapter,
   codexFlow,
+  CODEX_PICKER_MODELS,
   CODEX_PREEMPT_MS,
   codexProfileClaims,
   exchangeCodexCode,
@@ -121,15 +122,7 @@ export const Config: z<Config> = z.object({
 
 /** Built-in catalogs used when the config does not override a provider's models. */
 const DEFAULT_MODELS: Record<ProviderId, ModelEntry[]> = {
-  codex: [
-    { id: 'gpt-5.5', name: 'GPT-5.5' },
-    { id: 'gpt-5.4', name: 'GPT-5.4' },
-    { id: 'gpt-5.4-mini', name: 'GPT-5.4 Mini' },
-    { id: 'gpt-5.3-codex-spark', name: 'GPT-5.3 Codex Spark' },
-    { id: 'gpt-5.1-codex', name: 'GPT-5.1 Codex' },
-    { id: 'gpt-5.1-codex-mini', name: 'GPT-5.1 Codex Mini' },
-    { id: 'gpt-5.1', name: 'GPT-5.1' },
-  ],
+  codex: CODEX_PICKER_MODELS.map(model => ({ ...model })),
   claude: [
     { id: 'claude-opus-5', name: 'Claude Opus 5', maxTokens: 128_000, contextWindow: 1_000_000 },
     { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', maxTokens: 128_000, contextWindow: 1_000_000 },

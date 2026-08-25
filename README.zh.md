@@ -38,13 +38,13 @@
 
 | 路由     | 订阅             | 模型 |
 |----------|------------------|------|
-| `codex`  | ChatGPT Plus/Pro | 从 `chatgpt.com/backend-api/codex/models` 实时获取 |
+| `codex`  | ChatGPT Plus/Pro | 从实时目录提供 GPT-5.6 Sol、Terra、Luna |
 | `claude` | Claude Pro/Max   | 订阅内所有可用模型(Opus、Sonnet、Haiku、Fable —— 静态目录,随插件更新) |
 | `grok`   | X Premium (xAI)  | 从 `api.x.ai/v1/models` 实时获取(仅对话模型);推理等级来自 Grok CLI 目录(`cli-chat-proxy.grok.com/v1/models`) |
 
 只有已登录的 provider 才会出现在会话模型选择器里;登录/退出后列表自动刷新。支持视觉的模型会声明 `['text', 'image']` 输入模态,图片内容会被翻译成各 provider 的 wire 格式。
 
-Codex 实时模型发现不可用时,内置兜底目录仍包含 GPT-5.5、GPT-5.4、GPT-5.4 Mini 和 GPT-5.3 Codex Spark,确保这些模型上报的 Token 用量仍能进入会话计费统计。
+ChatGPT 模型选择器只显示 GPT-5.6 Sol、Terra、Luna。实时目录、持久化缓存、配置覆盖和内置兜底中的旧模型都会被移除;Claude 和 Grok 的模型目录不受影响。
 
 已登录的卡片还会显示**订阅用量**——按限额窗口(5 小时会话窗、每周窗,以及计划包含的按模型每周窗)展示已用百分比、进度条和重置时间,并带刷新按钮。Codex 用量来自 `chatgpt.com/backend-api/wham/usage`(同时报告计划类型),Claude 用量来自 `api.anthropic.com/api/oauth/usage`,Grok 用量来自 Grok Build CLI 代理的 `cli-chat-proxy.grok.com/v1/billing`(即 CLI `/usage` 面板的数据源,报告共享每周额度和订阅档位)。
 
