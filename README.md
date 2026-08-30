@@ -30,6 +30,8 @@ Its `provider` parameter picks the image backend — the same prompt through GPT
 
 ![image_generate with provider gpt vs grok](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/image-generate-providers.png)
 
+The slash menu exposes `/image <prompt>` while `image_generate` is available. It may carry reference-image attachments and submits an ordinary logged user request for the model to call the tool. `/read-image <workspace image path>` appears while the Harness `read_image` tool is available; it can also analyze composer image attachments directly.
+
 The `video_generate` tool plays the generated clip inline:
 
 ![video_generate plays the clip inline](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/video-generate-inline.png)
@@ -186,7 +188,7 @@ Changes apply immediately to subsequent requests — no restart needed. The OAut
 ## Develop
 
 ```sh
-pnpm install   # devDependencies link into a local deepseek-harness checkout — edit the paths first
+pnpm install   # devDependencies link to ../../deepseek-harness
 pnpm build     # tsc (lib/) + tsdown (lib/client.js browser bundle)
 pnpm test      # node --test over compiled unit specs
 ```
@@ -198,7 +200,7 @@ After `pnpm build`, restart `dsh web` to pick up changes.
 ## Layout
 
 - `src/index.ts` — plugin entry: config schema, adapter registration, auth-change re-announce, RPC wiring
-- `src/auth/` — PKCE/JWT helpers, token store, OAuth flow engine (temp loopback callback server), Claude Code credential reader (Keychain/file), authenticated `/api/subscriptions-auth/*` RPC endpoints
+- `src/auth/` — PKCE/JWT helpers, token store, OAuth flow engine (temp loopback callback server), Claude Code credential reader (Keychain/file), and the authenticated `subscriptionsAuth` Typert Remote service
 - `src/providers/` — per-provider OAuth constants/exchange/refresh + `LlmAdapter`s, multi-account token plumbing (`accounts.ts`), and the pool (`pool.ts` + `pool-health.ts` / `pool-usage.ts` / `pool-family.ts`)
 - `src/translate/` — dsh `Message[]` ⟷ OpenAI Responses / Anthropic Messages wire formats, SSE → `StreamChunk`
 - `src/tools/` — `x_search`, `image_generate`, and `video_generate`

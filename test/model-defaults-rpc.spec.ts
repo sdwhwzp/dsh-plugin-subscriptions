@@ -13,8 +13,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
-import type { RpcResult } from '@deepseek-ai/dsh-host-apiproxy/api'
+import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
+import { prepareTestRemote, type TestRemoteHandler } from './remote-helper.js'
 
 const HOME = mkdtempSync(join(tmpdir(), 'model-defaults-rpc-test-'))
 
@@ -35,14 +35,14 @@ interface FakeLlm {
  * of them. Each mount also resets the store and deletes the file, so the cases
  * below are independent — they used to pass only in their written order.
  */
-async function mount(options: { tier?: string } = {}): Promise<{ handler: ConnectionRpcHandler; fake: FakeLlm }> {
+async function mount(options: { tier?: string } = {}): Promise<{ handler: TestRemoteHandler; fake: FakeLlm }> {
   process.env.DSH_HOME = HOME
   assert.ok(modelDefaultsFilePath().startsWith(HOME), 'the store resolves inside this spec\'s temp home')
   await resetModelDefaultsForTests()
   rmSync(modelDefaultsFilePath(), { force: true })
-  let handler: ConnectionRpcHandler | undefined
   const fake: FakeLlm = { registered: [], replaced: [] }
   const ctx = new Context()
+  const handler = prepareTestRemote(ctx)
   const listed = [{ id: 'gpt-5.6-sol', name: 'GPT-5.6-Sol' }]
   // A configured tier appears in the picker catalog the same way the pool
   // contributes it, so the settings catalog has to recognise and skip it.
@@ -70,14 +70,6 @@ async function mount(options: { tier?: string } = {}): Promise<{ handler: Connec
     },
   }
   ctx.provide('llm', fakeLlm)
-  ctx.provide('connection', {
-    rpc: {
-      handle: (_channel: string, h: ConnectionRpcHandler) => {
-        handler = h
-        return () => Promise.resolve()
-      },
-    },
-  })
   ctx.plugin(plugin, {
     providers: ['codex'],
     ...options.tier === undefined ? {} : {
@@ -85,15 +77,14 @@ async function mount(options: { tier?: string } = {}): Promise<{ handler: Connec
     },
   })
   await new Promise(resolve => setTimeout(resolve, 50))
-  assert.ok(handler !== undefined, 'the /subscriptions-auth channel was registered')
   return { handler, fake }
 }
 
 async function call(
-  handler: ConnectionRpcHandler,
+  handler: TestRemoteHandler,
   endpoint: string,
   payload: unknown,
-): Promise<RpcResult<unknown>> {
+): Promise<RemoteResult<unknown>> {
   return handler(endpoint, payload, new AbortController().signal)
 }
 

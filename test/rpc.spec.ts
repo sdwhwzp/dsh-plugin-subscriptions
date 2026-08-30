@@ -1,5 +1,5 @@
 /**
- * Unit tests for the `/api/subscriptions-auth/image` endpoint: payload
+ * Unit tests for the `subscriptionsAuth/image` Remote action: payload
  * validation, the base64 round trip through a fake attachment store, and the
  * no-service / read-failure error results. Drives the real plugin wiring with
  * a fake host connection; DSH_HOME is redirected to a temp dir.
@@ -11,8 +11,8 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
-import type { RpcResult } from '@deepseek-ai/dsh-host-apiproxy/api'
+import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
+import { prepareTestRemote, type TestRemoteHandler } from './remote-helper.js'
 
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'router-rpc-test-'))
 
@@ -24,31 +24,22 @@ interface FakeStore {
 }
 
 /** Mount the plugin with fake llm/connection (and optional attachments); return the RPC handler. */
-async function mount(attachments?: FakeStore): Promise<ConnectionRpcHandler> {
-  let handler: ConnectionRpcHandler | undefined
+async function mount(attachments?: FakeStore): Promise<TestRemoteHandler> {
   const ctx = new Context()
+  const handler = prepareTestRemote(ctx)
   ctx.provide('llm', { registerAdapter: () => Object.assign(() => {}, { replace: () => {} }) })
-  ctx.provide('connection', {
-    rpc: {
-      intercept: (_channel: string, _matches: (endpoint: string) => boolean, h: ConnectionRpcHandler) => {
-        handler = h
-        return () => Promise.resolve()
-      },
-    },
-  })
   if (attachments !== undefined) ctx.provide('attachments', attachments)
   ctx.plugin(plugin, { providers: ['codex'] })
   await new Promise(resolve => setTimeout(resolve, 50))
-  assert.ok(handler !== undefined, 'the /api/subscriptions-auth/* endpoints were registered')
   return handler
 }
 
 const REF = { attachmentId: 'att-1', mediaType: 'image/png', bytes: 2, width: 1, height: 1 }
 
 async function call(
-  handler: ConnectionRpcHandler,
+  handler: TestRemoteHandler,
   payload: unknown,
-): Promise<RpcResult<unknown>> {
+): Promise<RemoteResult<unknown>> {
   return handler('subscriptions-auth/image', payload, new AbortController().signal, undefined)
 }
 

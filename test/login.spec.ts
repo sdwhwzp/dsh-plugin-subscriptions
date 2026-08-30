@@ -18,8 +18,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
-import type { RpcResult } from '@deepseek-ai/dsh-host-apiproxy/api'
+import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 
 import * as plugin from '../src/index.js'
 import { SubscriptionsAuthController } from '../src/index.js'
@@ -31,6 +30,7 @@ import {
 } from '../src/providers/claude.js'
 import { accountKeyOf, authFilePath, listAccounts } from '../src/auth/store.js'
 import type { ClaudeSession } from '../src/auth/store.js'
+import { prepareTestRemote, type TestRemoteHandler } from './remote-helper.js'
 
 const TEMP_DIRS: string[] = []
 
@@ -479,21 +479,12 @@ test('claude: an import and a logout fired together settle in call order', async
 // ---------------------------------------------------------------------------
 
 /** Mount the plugin with a fake llm/connection host; return the RPC handler. */
-async function mountPlugin(): Promise<ConnectionRpcHandler> {
-  let handler: ConnectionRpcHandler | undefined
+async function mountPlugin(): Promise<TestRemoteHandler> {
   const ctx = new Context()
+  const handler = prepareTestRemote(ctx)
   ctx.provide('llm', { registerAdapter: () => Object.assign(() => {}, { replace: () => {} }) })
-  ctx.provide('connection', {
-    rpc: {
-      handle: (_channel: string, h: ConnectionRpcHandler) => {
-        handler = h
-        return () => Promise.resolve()
-      },
-    },
-  })
   ctx.plugin(plugin, { providers: ['codex'] })
   await new Promise(resolve => setTimeout(resolve, 50))
-  assert.ok(handler !== undefined, 'the /subscriptions-auth channel was registered')
   return handler
 }
 
@@ -504,7 +495,7 @@ function signal(): AbortSignal {
 interface StatusValue { providers: Record<string, { accounts: unknown[]; busy: boolean }> }
 
 /** Unwrap a successful RPC result, failing the test with its error otherwise. */
-function okValue<T>(result: RpcResult<unknown>, what: string): T {
+function okValue<T>(result: RemoteResult<unknown>, what: string): T {
   assert.ok(result.ok, `${what}: ${result.ok ? '' : result.error.message}`)
   return result.value as T
 }
@@ -543,5 +534,27 @@ test('auth RPC: an unknown provider is rejected, not dispatched', async () => {
     const result = await handler('login', { provider: 'gemini' }, signal())
     assert.equal(result.ok, false)
     if (!result.ok) assert.equal(result.error.code, 'bad-request')
+  })
+})
+
+test('auth RPC: subaccounts cannot change provider credentials', async () => {
+  await inIsolatedHome(async () => {
+    const handler = await mountPlugin()
+    const child = { source: 'dsh-passwords', id: '2', username: 'child', role: 'user' } as const
+    const requests = [
+      ['login', { provider: 'codex' }],
+      ['manual', { provider: 'codex', input: 'callback-code' }],
+      ['cancel', { provider: 'codex' }],
+      ['logout', { provider: 'codex' }],
+    ] as const
+
+    for (const [endpoint, payload] of requests) {
+      const result = await handler(`subscriptions-auth/${endpoint}`, payload, signal(), child)
+      assert.equal(result.ok, false, endpoint)
+      if (!result.ok) {
+        assert.equal(result.error.code, 'forbidden', endpoint)
+        assert.match(result.error.message, /only to administrators$/, endpoint)
+      }
+    }
   })
 })

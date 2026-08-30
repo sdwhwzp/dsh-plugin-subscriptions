@@ -19,18 +19,16 @@ const CLIENT_EXTERNALS: readonly string[] = [
   'react-dom',
   'react-dom/client',
   '@deepseek-ai/cordis',
+  '@deepseek-ai/dsh-client-store',
   '@deepseek-ai/dsh-client-ui-slots',
-  '@deepseek-ai/dsh-client-web-react',
   '@deepseek-ai/dsh-client-ui-primitives',
-  '@deepseek-ai/dsh-client-ui-attachment',
-  '@deepseek-ai/dsh-client-schema-form',
 ]
 
 /**
  * Wire/type layers a client bundle may inline: browser-safe contracts
  * with no runtime identity to share (no Symbol/instanceof/singleton state).
  */
-const INLINE_SAFE = /^@deepseek-ai\/dsh-(host-apiproxy|session|llm|tools|brand)(\/|$)/
+const INLINE_SAFE = /^@deepseek-ai\/dsh-(session|llm|tools|brand|attachment)(\/|$)/
 
 /** Vendored framework libraries: ordinary libraries a browser bundle inlines. */
 const VENDORED_LIBRARY = /^@deepseek-ai\/(cosmokit|schemastery)(\/|$)/
@@ -38,9 +36,12 @@ const VENDORED_LIBRARY = /^@deepseek-ai\/(cosmokit|schemastery)(\/|$)/
 /** Generated descriptor/codec contribution with no shared runtime identity. */
 const GENERATED_REMOTE = /^@deepseek-ai\/dsh-[a-z0-9]+(?:-[a-z0-9]+)*\/remote$/
 
+/** This package's generated Remote descriptor is bundled into its own client artifact. */
+const OWN_REMOTE = 'dsh-plugin-subscriptions/remote'
+
 export default defineConfig({
   name: 'dsh-plugin-subscriptions/client',
-  entry: { client: 'src/client/index.ts' },
+  entry: { client: 'lib/types/client/index.js' },
   // Single lib/ artifact dir shared with the tsc-emitted node half;
   // entryFileNames pins the bundle at exactly lib/client.js.
   outDir: 'lib',
@@ -69,6 +70,7 @@ export default defineConfig({
     // table cannot answer. Type-only imports are erased and never reach here.
     name: 'dsh-client-bundle-purity',
     resolveId(source: string) {
+      if (source === OWN_REMOTE) return null
       if (!source.startsWith('@deepseek-ai/')) return null
       if (CLIENT_EXTERNALS.includes(source)) return null // platform module: external wins
       if (VENDORED_LIBRARY.test(source)) return null // vendored library: inline, no shared identity

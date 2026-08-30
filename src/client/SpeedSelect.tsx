@@ -14,8 +14,10 @@
 import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { ConnectionHandle, SessionId } from '@deepseek-ai/dsh-api-remotes/client'
+import type { ModelDirectoryResolver } from '@deepseek-ai/dsh-client-ui-model-selection/client'
+import { SessionId } from '@deepseek-ai/dsh-session/types'
 import { callSubscriptionsAuth } from './SubscriptionsSection.js'
+import type { SubscriptionsAuthClient } from './SubscriptionsSection.js'
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
 
@@ -61,14 +63,13 @@ export type SpeedSelectProps = PropsRuntime<'conversation.input.right'>
  * different dsh-session copies, and only the API-client boundary needs one.
  */
 export function createSpeedLoader(
-  connection: ConnectionHandle,
+  remote: SubscriptionsAuthClient,
+  models: ModelDirectoryResolver,
   sessionId: string,
 ): SpeedSelectInjected['loadSpeed'] {
   return async () => {
-    const state = await callSubscriptionsAuth<SpeedState>(connection.rpc, 'speed', { sessionId })
-    const { result } = await connection.api.sessions.models({ sessionId: sessionId as SessionId })
-    if (!result.ok) throw new Error(`session.models failed: ${result.error.code}: ${result.error.message}`)
-    const current = result.value.current
+    const state = await callSubscriptionsAuth<SpeedState>(remote, 'speed', { sessionId })
+    const current = (await models.directoryFor(SessionId(sessionId)).load()).current
     const visible = current !== null && current.provider === 'codex'
       && state.fastModels.includes(current.model)
     return { visible, tier: state.tier }
@@ -77,10 +78,10 @@ export function createSpeedLoader(
 
 /** The `setSpeed` half of the inject face: boolean outcome for the component's busy state. */
 export function createSpeedSetter(
-  connection: ConnectionHandle,
+  remote: SubscriptionsAuthClient,
   sessionId: string,
 ): SpeedSelectInjected['setSpeed'] {
-  return tier => callSubscriptionsAuth(connection.rpc, 'setSpeed', { sessionId, tier })
+  return tier => callSubscriptionsAuth(remote, 'setSpeed', { sessionId, tier })
     .then(() => true, () => false)
 }
 

@@ -30,6 +30,8 @@
 
 ![image_generate 的 provider 参数对比 gpt 与 grok](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/image-generate-providers.png)
 
+`image_generate` 可用时,斜杠菜单会显示 `/image <图片描述>`;该命令可携带参考图,并以普通且已记录的用户请求让模型调用工具。Harness 的 `read_image` 工具可用时,菜单还会显示 `/read-image <工作区图片路径>`;它也能直接分析输入框所附的图片。
+
 `video_generate` 工具生成的视频直接内联播放:
 
 ![video_generate 内联播放生成的视频](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/video-generate-inline.png)
@@ -185,7 +187,7 @@ tools+effort 的自动改道。
 ## 开发
 
 ```sh
-pnpm install   # devDependencies 用 link: 指向本地 deepseek-harness 检出 —— 先改成你的路径
+pnpm install   # devDependencies 通过 link: 指向 ../../deepseek-harness
 pnpm build     # tsc(lib/)+ tsdown(lib/client.js 浏览器 bundle)
 pnpm test      # 编译后跑 node --test 单测
 ```
@@ -197,7 +199,7 @@ pnpm test      # 编译后跑 node --test 单测
 ## 目录结构
 
 - `src/index.ts` —— 插件入口:配置 schema、adapter 注册、登录态变更通告、RPC 接线
-- `src/auth/` —— PKCE/JWT 工具、token 存储、OAuth 流程引擎(临时本地回调服务)、Claude Code 凭据读取器(Keychain/文件)、已认证的 `/api/subscriptions-auth/*` RPC 端点
+- `src/auth/` —— PKCE/JWT 工具、token 存储、OAuth 流程引擎(临时本地回调服务)、Claude Code 凭据读取器(Keychain/文件)、已认证的 `subscriptionsAuth` Typert Remote 服务
 - `src/providers/` —— 各 provider 的 OAuth 常量/换发/刷新 + `LlmAdapter` 实现,多账号 token 管理(`accounts.ts`),以及模型池(`pool.ts` + `pool-health.ts` / `pool-usage.ts` / `pool-family.ts`)
 - `src/translate/` —— dsh `Message[]` 与 OpenAI Responses / Anthropic Messages 格式互转,SSE → `StreamChunk`
 - `src/tools/` —— `x_search`、`image_generate` 与 `video_generate`

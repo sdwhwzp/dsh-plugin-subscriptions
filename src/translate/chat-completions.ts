@@ -6,7 +6,7 @@
  * translator, so tests need no streams.
  */
 
-import { CallId, EMPTY_RESPONSE_CODE, LlmError } from '@deepseek-ai/dsh-llm'
+import { ToolCallId as CallId, EMPTY_RESPONSE_CODE, LlmError } from '@deepseek-ai/dsh-llm'
 import type {
   ContentBlock,
   StreamChunk,

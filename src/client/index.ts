@@ -1,17 +1,23 @@
 /**
  * Subscription OAuth login page, browser half. Registers the Subscriptions
  * settings section; every login state fact arrives through the node half's
- * `/api/subscriptions-auth/*` RPC endpoints — this plugin holds no credential state of its
+ * generated `subscriptionsAuth` Remote namespace — this plugin holds no credential state of its
  * own. Section copy rides the client locale service: one 'settings.subscriptions'
  * namespace with zh/en dictionaries, rebound per read so the nav label and
  * page text follow the active locale.
  */
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-import type { ConnectionHandle, SessionId } from '@deepseek-ai/dsh-api-remotes/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
+import type {} from '@deepseek-ai/dsh-api-gateway/client'
+import subscriptionsAuthRemote from 'dsh-plugin-subscriptions/remote'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
 // Type-only: pulls the shell's SlotMap merge (the 'settings.section' entry).
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 // Type-only: pulls ui-conversation's SlotMap merge (the 'conversation.input.right' entry).
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+// Type-only: pulls the renderer-owned slots service.
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
+// Type-only: pulls the modelDirectories Context merge used by the Speed toggle.
+import type {} from '@deepseek-ai/dsh-client-ui-model-selection/client'
 // Type-only: pulls the locale plugin's Context merge (ctx.locale).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 // Type-only: the slash-command registry contract (the /fast contribution).
@@ -21,6 +27,7 @@ import type { CommandUiContract } from '@deepseek-ai/dsh-client-ui-commands/clie
 // nodenext the .js specifier resolves to the .tsx source (see README note).
 import { SubscriptionsSection } from './SubscriptionsSection.js'
 import type { SubscriptionsSectionInjected } from './SubscriptionsSection.js'
+import type { SubscriptionsAuthClient } from './SubscriptionsSection.js'
 import { ImageGenerateToolview, createImageLoader } from './ImageGenerateToolview.js'
 import type { ImageGenerateToolviewInjected } from './ImageGenerateToolview.js'
 import { VideoGenerateToolview, createVideoLoader } from './VideoGenerateToolview.js'
@@ -47,11 +54,10 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 const NS = 'settings.subscriptions'
 
 /**
- * Required services (cordis fiber inject): `slots` carries the registration
- * seat, `connection` the `/api/subscriptions-auth/*` RPC caller, and `locale` the copy
- * dictionaries.
+ * Required services: the renderer owns `slots`, API Gateway owns `remote`,
+ * model selection owns `modelDirectories`, and locale owns the copy dictionaries.
  */
-export const inject = ['slots', 'connection', 'locale']
+export const inject = ['slots', 'remote', 'modelDirectories', 'locale']
 
 /**
  * Register the Subscriptions section once the `settings.section` declaration
@@ -59,7 +65,9 @@ export const inject = ['slots', 'connection', 'locale']
  * constrained; registration depends on the slot through `slots.inject()`).
  * @param ctx - client root context.
  */
-export function apply(ctx: ClientContext): void {
+export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
+  const disposeRemote = await ctx.remote.$mount(subscriptionsAuthRemote)
+  const remote = (ctx.remote as unknown as { subscriptionsAuth: SubscriptionsAuthClient }).subscriptionsAuth
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-plugin-subscriptions: copy dictionaries')
   // Settings-shell nudge: the panel (nav title + header row + section body)
   // sits flush against the panel's top edge; push it down a little to leave
@@ -72,11 +80,8 @@ export function apply(ctx: ClientContext): void {
     document.head.appendChild(style)
     return () => style.remove()
   }, 'dsh-plugin-subscriptions: settings panel breathing room')
-  // The client-runtime Context merge types `connection` as the host handle;
-  // in the browser shell the same key holds the full client ConnectionHandle.
-  const connection = ctx.get('connection') as unknown as ConnectionHandle
   const t = ctx.locale.bind(NS) as SubscriptionsSectionInjected['t']
-  const injected = (): SubscriptionsSectionInjected => ({ rpc: connection.rpc, t })
+  const injected = (): SubscriptionsSectionInjected => ({ remote, t })
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: 'subscriptions',
@@ -89,7 +94,7 @@ export function apply(ctx: ClientContext): void {
   // The image_generate keyed toolview owns how image calls render inline; its
   // gallery bytes ride the same channel through the injected loader. The
   // framework synthesizes the toolview's own `t` seat from `locale: NS`.
-  const toolviewInjected = (): ImageGenerateToolviewInjected => ({ load: createImageLoader(connection.rpc) })
+  const toolviewInjected = (): ImageGenerateToolviewInjected => ({ load: createImageLoader(remote) })
   ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
     name: 'tool.call.toolview',
     key: 'image_generate',
@@ -99,7 +104,7 @@ export function apply(ctx: ClientContext): void {
 
   // The video_generate keyed toolview plays the saved MP4 inline; its bytes
   // ride the same channel's `video` endpoint through the injected loader.
-  const videoToolviewInjected = (): VideoGenerateToolviewInjected => ({ loadVideo: createVideoLoader(connection.rpc) })
+  const videoToolviewInjected = (): VideoGenerateToolviewInjected => ({ loadVideo: createVideoLoader(remote) })
   ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
     name: 'tool.call.toolview',
     key: 'video_generate',
@@ -116,8 +121,8 @@ export function apply(ctx: ClientContext): void {
     order: 0,
     locale: NS,
     inject: (sessionId: SessionId): SpeedSelectInjected => ({
-      loadSpeed: createSpeedLoader(connection, sessionId),
-      setSpeed: createSpeedSetter(connection, sessionId),
+      loadSpeed: createSpeedLoader(remote, ctx.modelDirectories, sessionId),
+      setSpeed: createSpeedSetter(remote, sessionId),
     }),
   }, SpeedSelect))
 
@@ -135,7 +140,7 @@ export function apply(ctx: ClientContext): void {
       ui: {
         kind: 'popupSelect',
         options: async (session) => {
-          const state = await createSpeedLoader(connection, session.sessionId)()
+          const state = await createSpeedLoader(remote, ctx.modelDirectories, session.sessionId)()
           if (!state.visible) throw new Error(t('commandFastUnavailable'))
           return ([
             { id: 'standard', label: t('speedStandard'), detail: t('speedStandardDescription') },
@@ -143,9 +148,10 @@ export function apply(ctx: ClientContext): void {
           ] as const).map(option => ({ ...option, active: option.id === state.tier }))
         },
         onSelect: async (option, session) => {
-          await createSpeedSetter(connection, session.sessionId)(option.id as 'standard' | 'fast')
+          await createSpeedSetter(remote, session.sessionId)(option.id as 'standard' | 'fast')
         },
       },
     }), 'dsh-plugin-subscriptions: /fast contribution')
   })
+  return disposeRemote
 }

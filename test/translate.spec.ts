@@ -6,7 +6,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { CallId, LlmError, MessageId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId as CallId, LlmError, MessageId } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, Message, MessageSource, StreamChunk } from '@deepseek-ai/dsh-llm'
 import {
   ResponsesStreamTranslator,

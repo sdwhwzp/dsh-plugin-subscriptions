@@ -4,7 +4,7 @@
  * and after settling; a settled result with image blocks renders them through
  * this plugin's own ImageGallery (harness rc.8 stopped exporting the platform
  * one as a package value), whose bytes load through the node half's
- * `/api/subscriptions-auth/*` RPC endpoints (the durable ImageAttachmentRef is never
+ * `subscriptionsAuth` Remote namespace (the durable ImageAttachmentRef is never
  * a fetchable URL on its own). A text-only settled result (degraded route)
  * renders its text; an error result renders the first error line.
  *
@@ -14,17 +14,14 @@
  * structurally (same discipline as platform-modules.d.ts).
  */
 import type { CSSProperties } from 'react'
-import type { ConnectionHandle, RpcResult } from '@deepseek-ai/dsh-api-remotes/client'
-import type { ToolCallBlock } from '@deepseek-ai/dsh-client-runtime/client'
+import type { ToolCallBlock } from '@deepseek-ai/dsh-client-ui-chat/client'
 import { IconSparkle16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { ImageGallery } from './ImageGallery.js'
 import type { ImageAttachmentRef, ImageLoader, MessageImageLabels } from './ImageGallery.js'
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
-
-/** Logical RPC channel served by the node half of this plugin. */
-const SUBSCRIPTIONS_AUTH_CHANNEL = '/api'
-const SUBSCRIPTIONS_AUTH_PREFIX = 'subscriptions-auth/'
+import { callSubscriptionsAuth } from './SubscriptionsSection.js'
+import type { SubscriptionsAuthClient } from './SubscriptionsSection.js'
 
 /** Title prompt truncation budget (characters). */
 const PROMPT_MAX_LENGTH = 60
@@ -35,6 +32,7 @@ interface ToolCallOwnerProps {
   toolName: string
   block: ToolCallBlock
   cwd?: string | undefined
+  home?: string | undefined
   openFile: (path: string) => void
   inspect?: (() => void) | undefined
 }
@@ -48,7 +46,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 
 /** Injected dependencies of {@link ImageGenerateToolview} (slot `inject`). */
 export interface ImageGenerateToolviewInjected {
-  /** Session-authorized image URL loader riding the `/api/subscriptions-auth/*` endpoints. */
+  /** Session-authorized image URL loader riding API Gateway. */
   load: ImageLoader
 }
 
@@ -68,32 +66,15 @@ interface ImageEndpointResult {
 }
 
 /**
- * Call one `/api/subscriptions-auth/*` endpoint and unwrap the business result.
- * @param rpc - Connection RPC caller.
- * @param endpoint - channel-relative endpoint.
- * @param payload - channel-owned request payload.
- * @returns the success value, cast by the caller to the endpoint's shape.
- */
-async function callSubscriptionsAuth<T>(rpc: ConnectionHandle['rpc'], endpoint: string, payload: unknown): Promise<T> {
-  const result: RpcResult<unknown> = await rpc.call(
-    SUBSCRIPTIONS_AUTH_CHANNEL,
-    `${SUBSCRIPTIONS_AUTH_PREFIX}${endpoint}`,
-    payload,
-  )
-  if (!result.ok) throw new Error(result.error.message)
-  return result.value as T
-}
-
-/**
  * Build the ImageGallery loader over the `image` endpoint.
- * @param rpc - Connection RPC caller.
+ * @param remote - generated subscriptions-auth Remote namespace.
  * @returns loader resolving an attachment ref to a data URL.
  */
-export function createImageLoader(rpc: ConnectionHandle['rpc']): ImageLoader {
+export function createImageLoader(remote: SubscriptionsAuthClient): ImageLoader {
   // The host validates a full ImageAttachmentRef payload (readImage takes the
   // whole ref), so forward the attachment verbatim.
   return attachment =>
-    callSubscriptionsAuth<ImageEndpointResult>(rpc, 'image', { ...attachment })
+    callSubscriptionsAuth<ImageEndpointResult>(remote, 'image', { ...attachment })
       .then(result => `data:${result.mediaType};base64,${result.dataBase64}`)
 }
 

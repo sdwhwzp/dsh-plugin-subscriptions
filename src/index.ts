@@ -1,9 +1,8 @@
 /**
  * dsh-plugin-subscriptions: register OAuth-subscription LLM providers
- * (ChatGPT/Codex, Claude, Grok, GitHub Copilot) on `ctx.llm`, and expose authenticated
- * `/api/subscriptions-auth/*` endpoints the web Settings page uses to run the logins. The token store
- * lives at `~/.dsh/plugins/subscriptions/auth.json`; the channel registers only when
- * a host `connection` service exists, so headless compositions load fine.
+ * (ChatGPT/Codex, Claude, Grok, GitHub Copilot) on `ctx.llm`, and expose the
+ * authenticated `subscriptionsAuth` Remote namespace used by the web Settings
+ * page. The token store lives at `~/.dsh/plugins/subscriptions/auth.json`.
  * @module dsh-plugin-subscriptions
  */
 
@@ -12,10 +11,10 @@ import z from '@deepseek-ai/schemastery'
 import { errorChain } from '@deepseek-ai/dsh-llm'
 import type {
   AdapterRegistrationHandle,
-  LlmAdapter,
-  LlmModelInfo,
   LlmResolvedModelInfo,
 } from '@deepseek-ai/dsh-llm'
+// Type-only: activates the `ctx.commands` Context merge for image commands.
+import type {} from '@deepseek-ai/dsh-commands'
 // Type-only: activates the `ctx.tools` Context merge for the inject block.
 import type {} from '@deepseek-ai/dsh-tools'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
@@ -24,7 +23,7 @@ import { DeviceFlowManager, type DeviceAttempt } from './auth/device-flow.js'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { readClaudeCodeCredentials, refreshClaudeSynced } from './auth/claude-code-creds.js'
-import { BadRequest, registerAuthRpc } from './auth/rpc.js'
+import { BadRequest, registerAuthRemote } from './auth/rpc.js'
 import type {
   AuthController,
   ImageBytesResult,
@@ -108,9 +107,11 @@ import { createXSearchTool } from './tools/x-search.js'
 import { createImageGenerateTool } from './tools/image-generate.js'
 import { createVideoGenerateTool, videosDirectory } from './tools/video-generate.js'
 import { proxiedFetch, proxyGetConfig, proxySetConfig, proxyTestConnection } from './http.js'
+import { applyImageCommands } from './image-commands.js'
 
 export type { ModelEntry, ProviderUsage, UsageWindow } from './providers/common.js'
 export type { ProviderStatus } from './auth/rpc.js'
+export { SubscriptionsAuthRemote } from './auth/rpc.js'
 export type { ClaudeSession, CodexSession, CopilotSession, GrokSession, ProviderId } from './auth/store.js'
 
 export const name = 'dsh-plugin-subscriptions'
@@ -260,7 +261,7 @@ function planOf(provider: ProviderId, session: StoredSession): string | undefine
 type UsageFetchers = Partial<Record<ProviderId, (account: string, signal: AbortSignal) => Promise<ProviderUsage>>>
 
 /**
- * Auth operations behind the `/subscriptions-auth` RPC channel: start/complete
+ * Auth operations behind the `subscriptionsAuth` Remote namespace: start/complete
  * OAuth attempts in the background, feed pasted codes, cancel, log out, and
  * answer usage lookups.
  *
@@ -925,7 +926,7 @@ export function apply(ctx: Context, config: Config): void {
       handles.get(provider)?.replace([provider])
     },
   }
-  registerAuthRpc(ctx, new SubscriptionsAuthController(
+  registerAuthRemote(ctx, new SubscriptionsAuthController(
     flows, deviceFlows, authChanged, resolveAttachments, usageFetchers, undefined, poolUsage,
   ), speed, {
     get: () => proxyGetConfig(),
@@ -958,11 +959,12 @@ export function apply(ctx: Context, config: Config): void {
   // x_search and video_generate follow the grok provider; image_generate
   // prefers the codex provider and falls back to grok.
   ctx.inject(['tools'], (toolsCtx) => {
+    const imageGenerationAvailable = codexTokens !== undefined || grokTokens !== undefined
     if (grokTokens !== undefined) {
       toolsCtx.tools.register(createXSearchTool({ tokens: grokTokens }))
       toolsCtx.tools.register(createVideoGenerateTool({ tokens: grokTokens }))
     }
-    if (codexTokens !== undefined || grokTokens !== undefined) {
+    if (imageGenerationAvailable) {
       toolsCtx.tools.register(createImageGenerateTool({
         ...codexTokens === undefined ? {} : { codexTokens },
         ...grokTokens === undefined ? {} : { grokTokens },
@@ -970,5 +972,8 @@ export function apply(ctx: Context, config: Config): void {
         resolveLlm: () => ctx.get('llm'),
       }))
     }
+    toolsCtx.inject(['commands'], (commandsCtx) => {
+      applyImageCommands(commandsCtx, { generate: imageGenerationAvailable })
+    })
   })
 }

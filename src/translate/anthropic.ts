@@ -6,7 +6,7 @@
  */
 
 import {
-  CallId,
+  ToolCallId as CallId,
   CONTEXT_WINDOW_EXCEEDED_CODE,
   EMPTY_RESPONSE_CODE,
   LlmError,

@@ -9,7 +9,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { CallId, MessageId, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId as CallId, MessageId, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import {
   completeCopilotLogin,

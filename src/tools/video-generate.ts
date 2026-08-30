@@ -239,7 +239,7 @@ export function createVideoGenerateTool(options: VideoGenerateToolOptions): Tool
           + `\nTemporary provider URL (expires soon): ${value.url}`,
       }],
       // The client toolview fetches the bytes by bare file name through the
-      // `/api/subscriptions-auth/video` endpoint; meta hands it that name.
+      // `subscriptionsAuth/video` Remote action; meta hands it that name.
       presentationMeta: (_args, value) => ({
         fileName: basename(value.path),
         ...value.duration === undefined ? {} : { duration: value.duration },

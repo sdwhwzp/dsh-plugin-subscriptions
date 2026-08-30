@@ -11,7 +11,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
+import { prepareTestRemote, type TestRemoteHandler } from './remote-helper.js'
 
 process.env.DSH_HOME ??= mkdtempSync(join(tmpdir(), 'router-usage-test-'))
 
@@ -24,6 +24,7 @@ const { SubscriptionsAuthController } = plugin
 const { OAuthFlowManager } = await import('../src/auth/oauth-flow.js')
 const { DeviceFlowManager } = await import('../src/auth/device-flow.js')
 const { PoolUsageTracker } = await import('../src/providers/pool-usage.js')
+const { deleteAccountSession, saveAccountSession } = await import('../src/auth/store.js')
 
 import { OAuthEndpointError } from '../src/providers/common.js'
 import type { FetchFn, ProviderUsage } from '../src/providers/common.js'
@@ -277,21 +278,12 @@ test('fetchGrokUsage tolerates a null config and non-2xx responses', async () =>
 })
 
 /** Mount the plugin with fake llm/connection; return the RPC handler. */
-async function mount(): Promise<ConnectionRpcHandler> {
-  let handler: ConnectionRpcHandler | undefined
+async function mount(): Promise<TestRemoteHandler> {
   const ctx = new Context()
+  const handler = prepareTestRemote(ctx)
   ctx.provide('llm', { registerAdapter: () => Object.assign(() => {}, { replace: () => {} }) })
-  ctx.provide('connection', {
-    rpc: {
-      handle: (_channel: string, h: ConnectionRpcHandler) => {
-        handler = h
-        return () => Promise.resolve()
-      },
-    },
-  })
   ctx.plugin(plugin, { providers: ['codex'] })
   await new Promise(resolve => setTimeout(resolve, 50))
-  assert.ok(handler !== undefined, 'the /subscriptions-auth channel was registered')
   return handler
 }
 
@@ -354,6 +346,82 @@ test('usage(): delegates to the pool usage cache, which withholds retries throug
   assert.equal(calls, 1)
   await assert.rejects(controller.usage('codex', 'a1', new AbortController().signal), error)
   assert.equal(calls, 1, 'a second call inside the retry-after window must not hit the network again')
+})
+
+test('usage endpoint: subaccounts cannot inspect provider quota', async () => {
+  await saveAccountSession('codex', codexSession.accountId, {
+    ...codexSession,
+    emailAddress: 'owner@example.test',
+  })
+  try {
+    const handler = await mount()
+    const signal = new AbortController().signal
+    const child = { source: 'dsh-passwords', id: '2', username: 'child', role: 'user' } as const
+    const status = await handler('subscriptions-auth/status', {}, signal, child)
+    assert.equal(status.ok, true)
+    if (status.ok) {
+      const value = status.value as {
+        providers: Record<string, Record<string, unknown>>
+        canViewUsage: boolean
+        canManageCredentials: boolean
+      }
+      assert.equal(value.canViewUsage, false)
+      assert.equal(value.canManageCredentials, false)
+      assert.deepEqual(value.providers.codex, { busy: false, accounts: [] })
+    }
+
+    const result = await handler(
+      'subscriptions-auth/usage',
+      { provider: 'codex', account: codexSession.accountId },
+      signal,
+      child,
+    )
+    assert.equal(result.ok, false)
+    if (!result.ok) {
+      assert.equal(result.error.code, 'forbidden')
+      assert.match(result.error.message, /only to administrators$/)
+    }
+  } finally {
+    await deleteAccountSession('codex', codexSession.accountId)
+  }
+})
+
+test('usage endpoint: administrators retain provider quota access', async () => {
+  await saveAccountSession('codex', codexSession.accountId, {
+    ...codexSession,
+    emailAddress: 'owner@example.test',
+  })
+  try {
+    const handler = await mount()
+    const signal = new AbortController().signal
+    const admin = { source: 'dsh-passwords', id: '1', username: 'owner', role: 'admin' } as const
+    const status = await handler('subscriptions-auth/status', {}, signal, admin)
+    assert.equal(status.ok, true)
+    if (status.ok) {
+      const value = status.value as {
+        providers: Record<string, Record<string, unknown>>
+        canViewUsage: boolean
+        canManageCredentials: boolean
+      }
+      assert.equal(value.canViewUsage, true)
+      assert.equal(value.canManageCredentials, true)
+      const account = (value.providers.codex as unknown as {
+        accounts: { account?: string; expiresAt?: number }[]
+      }).accounts[0]
+      assert.equal(account?.account, 'owner@example.test')
+      assert.equal(account?.expiresAt, codexSession.expiresAt)
+    }
+
+    const result = await handler(
+      'subscriptions-auth/usage',
+      { provider: 'grok', account: 'a1' },
+      signal,
+      admin,
+    )
+    assert.deepEqual(result, { ok: true, value: { supported: false } })
+  } finally {
+    await deleteAccountSession('codex', codexSession.accountId)
+  }
 })
 
 test('usage(): a manual (forced) refresh bypasses a fresh cached snapshot, not a live cooldown', async () => {

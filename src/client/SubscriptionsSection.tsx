@@ -1,6 +1,6 @@
 /**
  * Subscriptions settings section: one card per subscription provider with an
- * OAuth login/logout flow driven by the node half's `/subscriptions-auth` RPC
+ * OAuth login/logout flow driven by the node half's `subscriptionsAuth` Remote
  * channel. Login state lives server-side; the page polls `status` only while
  * a login attempt is busy, so an idle page never polls. All state is local
  * React state — the page has no store.
@@ -14,13 +14,10 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
-import type { ConnectionHandle, RpcResult } from '@deepseek-ai/dsh-api-remotes/client'
+import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
+import type { SubscriptionJsonValue } from '../wire.js'
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
-
-/** Logical RPC channel served by the node half of this plugin. */
-const SUBSCRIPTIONS_AUTH_CHANNEL = '/api'
-const SUBSCRIPTIONS_AUTH_PREFIX = 'subscriptions-auth/'
 
 /** Poll cadence while a provider login attempt is busy. */
 const POLL_INTERVAL_MS = 2000
@@ -123,8 +120,8 @@ interface LoginResponse {
 
 /** Injected dependencies of {@link SubscriptionsSection} (slot `inject`). */
 export interface SubscriptionsSectionInjected {
-  /** Generic logical-RPC caller over the Connection transport. */
-  rpc: ConnectionHandle['rpc']
+  /** Generated API Gateway namespace exposed by the Host plugin. */
+  remote: SubscriptionsAuthClient
   /** Section copy: translate a 'settings.subscriptions' key with `{name}` template params. */
   t: (key: SubscriptionsKey, params?: Record<string, unknown>) => string
 }
@@ -146,18 +143,32 @@ const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [
 /** Business error returned by the `/subscriptions-auth` channel (error branch message). */
 class SubscriptionsAuthError extends Error {}
 
+/** Browser projection of the generated subscriptions-auth Remote namespace. */
+export interface SubscriptionsAuthClient {
+  /** Execute one action through API Gateway. */
+  execute(
+    action: string,
+    payload: SubscriptionJsonValue,
+    signal?: AbortSignal,
+  ): Promise<RemoteResult<SubscriptionJsonValue>>
+}
+
 /**
  * Call one `/subscriptions-auth` endpoint and unwrap the business result.
  * Shared by the settings section and the composer Speed toggle.
- * @param rpc - Connection RPC caller.
- * @param endpoint - channel-relative endpoint.
- * @param payload - channel-owned request payload.
+ * @param remote - generated API Gateway namespace.
+ * @param action - plugin-owned action.
+ * @param payload - action payload.
  * @returns the success value, cast by the caller to the endpoint's shape.
  */
-export async function callSubscriptionsAuth<T>(rpc: ConnectionHandle['rpc'], endpoint: string, payload: unknown): Promise<T> {
-  let result: RpcResult<unknown>
+export async function callSubscriptionsAuth<T>(
+  remote: SubscriptionsAuthClient,
+  action: string,
+  payload: SubscriptionJsonValue,
+): Promise<T> {
+  let result: RemoteResult<SubscriptionJsonValue>
   try {
-    result = await rpc.call(SUBSCRIPTIONS_AUTH_CHANNEL, `${SUBSCRIPTIONS_AUTH_PREFIX}${endpoint}`, payload)
+    result = await remote.execute(action, payload)
   } catch (error) {
     // The transport rejected rather than answering; surface the same way.
     throw new SubscriptionsAuthError(error instanceof Error ? error.message : String(error))
@@ -516,7 +527,7 @@ export function modelDefaultsSignature(
  * @returns the section body, or a notice while the RPC face is absent.
  */
 export function SubscriptionsSection(props: SubscriptionsSectionProps) {
-  const { rpc } = props
+  const { remote } = props
   const t = props.t ?? fallbackTranslate
   const [statuses, setStatuses] = useState<Partial<Record<SubscriptionProvider, ProviderStatus>>>({})
   const [canViewUsage, setCanViewUsage] = useState(false)
@@ -590,10 +601,10 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
 
   /** Refetch every provider's status; stop a provider's poller once its attempt settles. */
   const refresh = useCallback(async (): Promise<void> => {
-    if (rpc === undefined) return
+    if (remote === undefined) return
     let response: StatusResponse
     try {
-      response = await callSubscriptionsAuth<StatusResponse>(rpc, 'status', {})
+      response = await callSubscriptionsAuth<StatusResponse>(remote, 'status', {})
     } catch {
       // A failed poll must not kill the page; busy providers keep polling and
       // the action paths report their own errors.
@@ -616,7 +627,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
         })
       }
     }
-  }, [rpc, stopPolling])
+  }, [remote, stopPolling])
 
   const startPolling = useCallback((provider: SubscriptionProvider): void => {
     if (pollersRef.current.has(provider)) return
@@ -645,11 +656,11 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
 
   const loadUsage = useCallback(async (provider: SubscriptionProvider, account: string, force = false): Promise<void> => {
     const key = `${provider}:${account}`
-    if (!canViewUsage || rpc === undefined || usageInflightRef.current.has(key)) return
+    if (!canViewUsage || remote === undefined || usageInflightRef.current.has(key)) return
     usageInflightRef.current.add(key)
     setUsageLoading(prev => ({ ...prev, [key]: true }))
     try {
-      const usage = await callSubscriptionsAuth<ProviderUsage>(rpc, 'usage', { provider, account, ...force ? { force: true } : {} })
+      const usage = await callSubscriptionsAuth<ProviderUsage>(remote, 'usage', { provider, account, ...force ? { force: true } : {} })
       if (!mountedRef.current) return
       setUsages(prev => ({ ...prev, [key]: usage }))
       setUsageErrors((prev) => {
@@ -663,7 +674,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       usageInflightRef.current.delete(key)
       if (mountedRef.current) setUsageLoading(prev => ({ ...prev, [key]: false }))
     }
-  }, [rpc, canViewUsage])
+  }, [remote, canViewUsage])
 
   // Fetch usage once an account is logged in; drop the snapshots of accounts
   // that vanished so a re-login refetches. A failed lookup does not auto-retry
@@ -687,11 +698,11 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   }, [statuses, usages, usageErrors, loadUsage, canViewUsage])
 
   const loadModelDefaultsData = useCallback(async (signature: string): Promise<void> => {
-    if (rpc === undefined || modelDefaultsInflightRef.current) return
+    if (remote === undefined || modelDefaultsInflightRef.current) return
     modelDefaultsInflightRef.current = true
     setModelDefaultsLoading(true)
     try {
-      const catalog = await callSubscriptionsAuth<ModelDefaultsCatalog[]>(rpc, 'modelDefaults', {})
+      const catalog = await callSubscriptionsAuth<ModelDefaultsCatalog[]>(remote, 'modelDefaults', {})
       if (!mountedRef.current) return
       const next: Partial<Record<SubscriptionProvider, ModelDefaultsCatalog>> = {}
       for (const entry of catalog) next[entry.provider] = entry
@@ -710,7 +721,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       modelDefaultsInflightRef.current = false
       if (mountedRef.current) setModelDefaultsLoading(false)
     }
-  }, [rpc])
+  }, [remote])
 
   // Fetch the default-effort catalogs only once a card's list is expanded: the
   // node half resolves live model info per model, so a collapsed page must not
@@ -759,7 +770,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   }, [])
 
   const setModelDefault = useCallback(async (provider: SubscriptionProvider, model: string, effort: string | undefined): Promise<void> => {
-    if (rpc === undefined) return
+    if (remote === undefined) return
     const key = `${provider}/${model}`
     setModelDefaultsSaving(key)
     // Hold the picked level locally for the duration of the save: the select
@@ -773,7 +784,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       return next
     })
     try {
-      await callSubscriptionsAuth<{ ok: true }>(rpc, 'setModelDefault', {
+      await callSubscriptionsAuth<{ ok: true }>(remote, 'setModelDefault', {
         provider,
         model,
         ...(effort === undefined ? {} : { effort }),
@@ -812,13 +823,13 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
         })
       }
     }
-  }, [rpc])
+  }, [remote])
 
   const login = useCallback(async (provider: SubscriptionProvider, method?: 'oauth' | 'keychain'): Promise<void> => {
-    if (rpc === undefined) return
+    if (remote === undefined) return
     setProviderError(provider, undefined)
     try {
-      const response = await callSubscriptionsAuth<LoginResponse>(rpc, 'login', {
+      const response = await callSubscriptionsAuth<LoginResponse>(remote, 'login', {
         provider,
         ...method === undefined ? {} : { method },
       })
@@ -847,55 +858,55 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     } catch (error) {
       setProviderError(provider, messageOf(error))
     }
-  }, [rpc, t, setProviderError, startPolling])
+  }, [remote, t, setProviderError, startPolling])
 
   const cancel = useCallback(async (provider: SubscriptionProvider): Promise<void> => {
-    if (rpc === undefined) return
+    if (remote === undefined) return
     stopPolling(provider)
     try {
-      await callSubscriptionsAuth<{ ok: true }>(rpc, 'cancel', { provider })
+      await callSubscriptionsAuth<{ ok: true }>(remote, 'cancel', { provider })
     } catch (error) {
       setProviderError(provider, messageOf(error))
     }
     await refresh()
-  }, [rpc, stopPolling, setProviderError, refresh])
+  }, [remote, stopPolling, setProviderError, refresh])
 
   const submitManual = useCallback(async (provider: SubscriptionProvider): Promise<void> => {
-    if (rpc === undefined) return
+    if (remote === undefined) return
     const input = manualDrafts[provider].trim()
     if (input === '') return
     setProviderError(provider, undefined)
     try {
-      await callSubscriptionsAuth<{ ok: true }>(rpc, 'manual', { provider, input })
+      await callSubscriptionsAuth<{ ok: true }>(remote, 'manual', { provider, input })
       if (mountedRef.current) setManualDrafts(prev => ({ ...prev, [provider]: '' }))
     } catch (error) {
       setProviderError(provider, messageOf(error))
     }
     await refresh()
-  }, [rpc, manualDrafts, setProviderError, refresh])
+  }, [remote, manualDrafts, setProviderError, refresh])
 
   const logout = useCallback(async (provider: SubscriptionProvider, account: string, display: string, name: string): Promise<void> => {
-    if (rpc === undefined) return
+    if (remote === undefined) return
     if (!window.confirm(t('logoutAccountConfirm', { provider: name, account: display }))) return
     setProviderError(provider, undefined)
     try {
-      await callSubscriptionsAuth<{ ok: true }>(rpc, 'logout', { provider, account })
+      await callSubscriptionsAuth<{ ok: true }>(remote, 'logout', { provider, account })
     } catch (error) {
       setProviderError(provider, messageOf(error))
     }
     await refresh()
-  }, [rpc, t, setProviderError, refresh])
+  }, [remote, t, setProviderError, refresh])
 
   const setDefault = useCallback(async (provider: SubscriptionProvider, account: string): Promise<void> => {
-    if (rpc === undefined) return
+    if (remote === undefined) return
     setProviderError(provider, undefined)
     try {
-      await callSubscriptionsAuth<{ ok: true }>(rpc, 'setDefault', { provider, account })
+      await callSubscriptionsAuth<{ ok: true }>(remote, 'setDefault', { provider, account })
     } catch (error) {
       setProviderError(provider, messageOf(error))
     }
     await refresh()
-  }, [rpc, setProviderError, refresh])
+  }, [remote, setProviderError, refresh])
 
   const copyDeviceCode = useCallback((provider: SubscriptionProvider, userCode: string): void => {
     void navigator.clipboard?.writeText(userCode).then(() => {
@@ -911,13 +922,13 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
 
   // Proxy configuration: load once on mount; the dialog drives proxySet/proxyTest.
   useEffect(() => {
-    if (rpc === undefined || !canManageCredentials) {
+    if (remote === undefined || !canManageCredentials) {
       setProxy(undefined)
       setProxyLoadError(undefined)
       return
     }
     let alive = true
-    void callSubscriptionsAuth<ProxyConfigView>(rpc, 'proxyGet', {}).then((view) => {
+    void callSubscriptionsAuth<ProxyConfigView>(remote, 'proxyGet', {}).then((view) => {
       if (!alive) return
       setProxy(view)
       setProxyLoadError(undefined)
@@ -925,7 +936,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       if (alive) setProxyLoadError(messageOf(error))
     })
     return () => { alive = false }
-  }, [rpc, canManageCredentials])
+  }, [remote, canManageCredentials])
 
   useEffect(() => {
     if (!proxyOpen) return
@@ -950,11 +961,11 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   }, [proxy])
 
   const saveProxy = useCallback(async (): Promise<void> => {
-    if (rpc === undefined) return
+    if (remote === undefined) return
     setProxySaving(true)
     setProxyMessage(undefined)
     try {
-      const view = await callSubscriptionsAuth<ProxyConfigView>(rpc, 'proxySet', {
+      const view = await callSubscriptionsAuth<ProxyConfigView>(remote, 'proxySet', {
         enabled: proxyEnabled,
         url: proxyUrl.trim(),
         username: proxyUsername,
@@ -970,16 +981,16 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     } finally {
       setProxySaving(false)
     }
-  }, [rpc, proxyEnabled, proxyUrl, proxyUsername, proxyPassword, proxyClearPassword, proxyBypass, t])
+  }, [remote, proxyEnabled, proxyUrl, proxyUsername, proxyPassword, proxyClearPassword, proxyBypass, t])
 
   const testProxy = useCallback(async (): Promise<void> => {
-    if (rpc === undefined || proxyTesting) return
+    if (remote === undefined || proxyTesting) return
     setProxyTesting(true)
     setProxyTestResult(undefined)
     try {
       // Test the dialog's current inputs (they do not need to be saved first);
       // the host builds a throwaway agent for the probe.
-      setProxyTestResult(await callSubscriptionsAuth<ProxyTestResult>(rpc, 'proxyTest', {
+      setProxyTestResult(await callSubscriptionsAuth<ProxyTestResult>(remote, 'proxyTest', {
         proxy: {
           url: proxyUrl.trim(),
           ...proxyUsername.trim() !== '' ? { username: proxyUsername.trim() } : {},
@@ -991,9 +1002,9 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     } finally {
       setProxyTesting(false)
     }
-  }, [rpc, proxyTesting, proxyUrl, proxyUsername, proxyPassword])
+  }, [remote, proxyTesting, proxyUrl, proxyUsername, proxyPassword])
 
-  if (rpc === undefined) {
+  if (remote === undefined) {
     return <p style={styles.intro}>{t('unavailable')}</p>
   }
 

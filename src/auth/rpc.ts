@@ -1,25 +1,22 @@
 /**
- * The `/subscriptions-auth` host RPC channel the web Settings page drives. The
- * channel is registered only when a host `connection` service exists (the web
- * profile); headless compositions load the plugin without it. All business
- * outcomes are returned as RpcResult values; handlers never throw.
+ * The subscriptions-auth Remote namespace the web Settings page drives.
+ * Transport authentication is owned by API Gateway; this service reads only
+ * the verified principal stored for the active invocation.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
-import type { RpcResult } from '@deepseek-ai/dsh-host-apiproxy/api'
+import type {} from '@deepseek-ai/dsh-api-gateway/types'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { AuthenticatedPrincipal } from '@deepseek-ai/dsh-llm'
+import { Remote, TypertRemoteFailure, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
+import type { SubscriptionJsonValue } from '../wire.js'
 import { PROVIDER_IDS, type ProviderId } from './store.js'
 import type { ProviderUsage } from '../providers/common.js'
 import type { ProxyConfigView, ProxyDraft, ProxyInput, ProxyTestResult } from '../http.js'
 
-/** Shared authenticated RPC channel used by the web client. */
-export const SUBSCRIPTIONS_AUTH_CHANNEL = '/api'
-
-/** Endpoint prefix owned by this plugin on the shared channel. */
-export const SUBSCRIPTIONS_AUTH_PREFIX = 'subscriptions-auth/'
+/** API Gateway namespace generated for the browser client. */
+export const SUBSCRIPTIONS_AUTH_NAMESPACE = 'subscriptionsAuth'
 
 /** Media types the attachment store accepts (ImageMediaType). */
 const IMAGE_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] as const
@@ -183,20 +180,19 @@ export class BadRequest extends Error {}
 /** A subaccount may use assigned models but cannot inspect or mutate the owner's subscription. */
 class AdminForbidden extends Error {}
 
-function ok(value: unknown): RpcResult<unknown> {
-  return { ok: true, value }
+function ok(value: unknown): SubscriptionJsonValue {
+  return value as SubscriptionJsonValue
 }
 
-function failure(error: unknown): RpcResult<unknown> {
+function failure(error: unknown): TypertRemoteFailure {
   const message = error instanceof Error ? error.message : String(error)
   if (error instanceof BadRequest) {
-    // The issues array is zod-shaped upstream; this channel validates by hand.
-    return { ok: false, error: { code: 'bad-request', message, details: { issues: [] } } }
+    return new TypertRemoteFailure({ code: 'bad-request', message, details: { issues: [] } })
   }
   if (error instanceof AdminForbidden) {
-    return { ok: false, error: { code: 'bad-request', message: `forbidden: ${message}`, details: { issues: [] } } }
+    return new TypertRemoteFailure({ code: 'forbidden', message, details: {} })
   }
-  return { ok: false, error: { code: 'internal', message, details: {} } }
+  return new TypertRemoteFailure({ code: 'internal', message, details: {} })
 }
 
 /** Whether this verified caller may inspect provider-level subscription quota. */
@@ -431,7 +427,7 @@ async function dispatch(
   payload: unknown,
   signal: AbortSignal,
   principal: AuthenticatedPrincipal | undefined,
-): Promise<RpcResult<unknown>> {
+): Promise<SubscriptionJsonValue> {
   switch (endpoint) {
     case 'status': {
       const entries = await Promise.all(PROVIDER_IDS.map(
@@ -509,54 +505,91 @@ async function dispatch(
       }
       return ok({ ok: true })
     default:
-      throw new BadRequest(`unknown /api/${SUBSCRIPTIONS_AUTH_PREFIX}${endpoint} endpoint`)
+      throw new BadRequest(`unknown ${SUBSCRIPTIONS_AUTH_NAMESPACE}/${endpoint} endpoint`)
+  }
+}
+
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    /** Host owner of the subscription-auth Remote namespace. */
+    subscriptionsAuth: SubscriptionsAuthRemote
+  }
+}
+
+/** Dependencies retained by the Host Remote service for its process lifetime. */
+export interface SubscriptionsAuthRemoteOptions {
+  /** Provider OAuth and account operations. */
+  readonly controller: AuthController
+  /** Per-session Codex speed selection. */
+  readonly speed: SpeedController
+  /** Optional proxy configuration. */
+  readonly proxy?: ProxyConfigController
+  /** Optional per-model effort defaults. */
+  readonly modelDefaults?: ModelDefaultsController
+}
+
+/** Host service backing the generated `ctx.remote.subscriptionsAuth` namespace. */
+export class SubscriptionsAuthRemote extends TypertRemoteService {
+  /**
+   * @param ctx - Host context carrying API Gateway when the web profile is mounted.
+   * @param options - auth, speed, proxy, and effort operations.
+   */
+  constructor(ctx: Context, private readonly options: SubscriptionsAuthRemoteOptions) {
+    super(ctx, 'subscriptionsAuth', { namespace: SUBSCRIPTIONS_AUTH_NAMESPACE })
+  }
+
+  /**
+   * Execute one validated subscription action through API Gateway.
+   * @param action - action name owned by this plugin.
+   * @param payload - lossless JSON action payload.
+   * @param signal - caller cancellation for provider I/O and attachment reads.
+   * @returns the action-specific lossless JSON value.
+   * @throws TypertRemoteFailure for validation, authorization, or provider failures.
+   */
+  @Remote('execute')
+  async execute(
+    action: string,
+    payload: SubscriptionJsonValue,
+    signal: AbortSignal,
+  ): Promise<SubscriptionJsonValue> {
+    try {
+      return await dispatch(
+        this.options.controller,
+        this.options.speed,
+        this.options.proxy,
+        this.options.modelDefaults,
+        action,
+        payload,
+        signal,
+        this.ctx.get('typertGateway')?.currentPrincipal(),
+      )
+    } catch (error: unknown) {
+      throw failure(error)
+    }
   }
 }
 
 /**
- * Register the `/subscriptions-auth` RPC channel when a host connection exists.
- * @param ctx - the plugin context (headless profiles have no `connection`).
+ * Register the subscription-auth Remote service when the Typert registry exists.
+ * @param ctx - plugin context; minimal profiles without Typert remain usable.
  * @param controller - the auth operations backing the endpoints.
  * @param speed - the per-session speed-tier state backing the Speed toggle.
  * @param proxy - optional proxy-config controller backing `proxyGet`/`proxySet`/`proxyTest`.
  * @param modelDefaults - optional per-model default-effort state backing `modelDefaults`/`setModelDefault`.
  */
-export function registerAuthRpc(
+export function registerAuthRemote(
   ctx: Context,
   controller: AuthController,
   speed: SpeedController,
   proxy: ProxyConfigController | undefined = undefined,
   modelDefaults: ModelDefaultsController | undefined = undefined,
 ): void {
-  // `connection` is not in this plugin's inject list (headless compositions
-  // lack it), so its startup order is unconstrained: defer registration until
-  // the service exists instead of probing once at apply time.
-  ctx.inject(['connection'], (ctx) => {
-    const connection = ctx.get('connection') as HostConnectionHandle
-    ctx.effect(
-      () => connection.rpc.intercept(
-        SUBSCRIPTIONS_AUTH_CHANNEL,
-        endpoint => endpoint.startsWith(SUBSCRIPTIONS_AUTH_PREFIX)
-          && endpoint.length > SUBSCRIPTIONS_AUTH_PREFIX.length,
-        async (endpoint, payload, signal, principal) => {
-          try {
-            return await dispatch(
-              controller,
-              speed,
-              proxy,
-              modelDefaults,
-              endpoint.slice(SUBSCRIPTIONS_AUTH_PREFIX.length),
-              payload,
-              signal,
-              principal,
-            )
-          } catch (error) {
-            return failure(error)
-          }
-        },
-        { authority: 'loopback' },
-      ),
-      'dsh-plugin-subscriptions: /api/subscriptions-auth/* rpc endpoints',
-    )
+  ctx.inject(['typert'], (remoteCtx) => {
+    new SubscriptionsAuthRemote(remoteCtx, {
+      controller,
+      speed,
+      ...proxy === undefined ? {} : { proxy },
+      ...modelDefaults === undefined ? {} : { modelDefaults },
+    })
   })
 }
