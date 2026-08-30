@@ -22,8 +22,10 @@ import type { ContentBlock, LlmRuntime } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition, ToolExecution } from '@deepseek-ai/dsh-tools'
 import type { CodexSession, GrokSession } from '../auth/store.js'
-import { httpLlmError, TokenManager } from '../providers/common.js'
+import { httpLlmError } from '../providers/common.js'
+import { AccountTokenManager } from '../providers/accounts.js'
 import type { FetchFn } from '../providers/common.js'
+import { proxiedFetch } from '../http.js'
 
 /** Endpoint the codex generation request is posted to. */
 export const IMAGE_GENERATE_URL = 'https://chatgpt.com/backend-api/codex/images/generations'
@@ -37,9 +39,9 @@ export const GROK_IMAGE_GENERATE_MODEL = 'grok-imagine-image-2.0'
 /** Dependencies of the `image_generate` tool. */
 export interface ImageGenerateToolOptions {
   /** Codex session source; the default preferred provider (`provider: 'gpt'`). */
-  codexTokens?: TokenManager<CodexSession>
+  codexTokens?: AccountTokenManager<CodexSession>
   /** Grok session source; preferred when the call passes `provider: 'grok'`. */
-  grokTokens?: TokenManager<GrokSession>
+  grokTokens?: AccountTokenManager<GrokSession>
   /** Fetch implementation (injectable for tests). */
   fetchFn?: FetchFn
   /** Directory override for saved images (defaults under the harness home). */
@@ -327,7 +329,7 @@ export function createImageGenerateTool(options: ImageGenerateToolOptions): Tool
       content: result.content.filter(block => block.type === 'text'),
     }),
     async execute(args, exec) {
-      const fetchFn = options.fetchFn ?? fetch
+      const fetchFn = options.fetchFn ?? proxiedFetch
       // Provider selection: the preferred provider (default gpt) when logged
       // in, the other one as the fallback. A configured-but-logged-out manager
       // still resolves through `session()` below so the standard log-in hint

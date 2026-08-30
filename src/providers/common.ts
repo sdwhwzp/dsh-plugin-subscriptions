@@ -12,8 +12,8 @@ import {
   isQuotaExceededError,
   LlmError,
   QUOTA_EXCEEDED_CODE,
+  ReasoningEffortId,
 } from '@deepseek-ai/dsh-llm'
-import type { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 
 /** One configured model catalog entry. */
 export interface ModelEntry {
@@ -27,6 +27,12 @@ export interface ModelEntry {
   maxTokens?: number
   /** Accepted request modalities; when set, wins over the provider default. */
   inputModalities?: ('text' | 'image')[]
+  /**
+   * Force this model's upstream protocol. Only the copilot adapter consumes
+   * the semantics; the union is inlined here to avoid a circular import of
+   * the copilot module's `CopilotWire`.
+   */
+  wire?: 'chat-completions' | 'responses'
 }
 
 /**
@@ -54,6 +60,9 @@ export function validateModels(models: readonly ModelEntry[], label: string): Mo
         || model.inputModalities.some(modality => modality !== 'text' && modality !== 'image'))) {
       throw new Error(`${label}: catalog model "${model.id}" inputModalities must be a non-empty list of "text"/"image"`)
     }
+    if (model.wire !== undefined && model.wire !== 'chat-completions' && model.wire !== 'responses') {
+      throw new Error(`${label}: catalog model "${model.id}" wire must be "chat-completions" or "responses"`)
+    }
     if (seen.has(model.id)) throw new Error(`${label}: duplicate catalog model "${model.id}"`)
     seen.add(model.id)
     return {
@@ -62,6 +71,7 @@ export function validateModels(models: readonly ModelEntry[], label: string): Mo
       ...model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow },
       ...model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens },
       ...model.inputModalities === undefined ? {} : { inputModalities: [...model.inputModalities] },
+      ...model.wire === undefined ? {} : { wire: model.wire },
     }
   })
 }
@@ -91,16 +101,23 @@ export async function httpLlmError(response: Response, label: string): Promise<L
   else if (response.status === 408 || response.status === 504) code = 'TIMEOUT'
   else if (response.status >= 500) code = 'SERVER'
   else code = `HTTP_${String(response.status)}`
-  const retryAfter = response.headers.get('retry-after')
-  let providerRetryAfterMs: number | undefined
-  if (retryAfter !== null) {
-    const seconds = Number(retryAfter)
-    if (Number.isFinite(seconds) && seconds > 0) providerRetryAfterMs = seconds * 1000
-  }
+  const providerRetryAfterMs = parseRetryAfterMs(response)
   return new LlmError(message, code, {
     status: response.status,
     ...providerRetryAfterMs === undefined ? {} : { providerRetryAfterMs },
   })
+}
+
+/**
+ * Parse a response's `retry-after` header (seconds) into milliseconds.
+ * @param response - the failed response.
+ * @returns the delay in ms, or undefined when absent/unusable.
+ */
+function parseRetryAfterMs(response: Response): number | undefined {
+  const retryAfter = response.headers.get('retry-after')
+  if (retryAfter === null) return undefined
+  const seconds = Number(retryAfter)
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined
 }
 
 /** An idle watchdog: aborts its signal when no SSE activity arrives within the timeout. */
@@ -176,12 +193,21 @@ export class OAuthEndpointError extends Error {
   readonly status: number
   /** The provider's OAuth `error` code (e.g. `invalid_grant`), when present. */
   readonly oauthCode: string | undefined
+  /**
+   * The endpoint's `retry-after`, in ms, when it sent one. Usage/models
+   * endpoints reuse this error type and can rate-limit progressively (each
+   * hit within the window extends the next one), so a caller retrying on a
+   * fixed schedule instead of honoring this can keep an account locked out
+   * indefinitely.
+   */
+  readonly retryAfterMs: number | undefined
 
-  constructor(message: string, status: number, oauthCode?: string) {
+  constructor(message: string, status: number, oauthCode?: string, retryAfterMs?: number) {
     super(message)
     this.name = 'OAuthEndpointError'
     this.status = status
     this.oauthCode = oauthCode
+    this.retryAfterMs = retryAfterMs
   }
 }
 
@@ -204,7 +230,7 @@ export async function oauthEndpointError(response: Response, label: string): Pro
   const message = detail.length > 0
     ? `${label} token endpoint error (HTTP ${String(response.status)}): ${detail}`
     : `${label} token endpoint error (HTTP ${String(response.status)})`
-  return new OAuthEndpointError(message, response.status, oauthCode)
+  return new OAuthEndpointError(message, response.status, oauthCode, parseRetryAfterMs(response))
 }
 
 /** A session fresh enough to serve a request without a refresh. */
@@ -324,6 +350,34 @@ export class TokenManager<S extends TimedSession> {
 /** Fetch signature adapters accept for discovery calls (injectable for tests). */
 export type FetchFn = typeof fetch
 
+/** Bound on one account catalog fetch or usage poll — a hang must not block the picker. */
+export const DISCOVERY_TIMEOUT_MS = 10_000
+
+/**
+ * Run `work` with an aborting signal. Resolves undefined when the timeout
+ * fires (the fetch is aborted); other failures propagate.
+ */
+export function withTimeout<T>(
+  work: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number,
+): Promise<T | undefined> {
+  const signal = AbortSignal.timeout(timeoutMs)
+  const aborted = new Promise<undefined>(resolve => {
+    if (signal.aborted) resolve(undefined)
+    else signal.addEventListener('abort', () => resolve(undefined), { once: true })
+  })
+  return Promise.race([
+    work(signal).then(
+      value => (signal.aborted ? undefined : value),
+      (error: unknown) => {
+        if (signal.aborted) return undefined
+        throw error
+      },
+    ),
+    aborted,
+  ])
+}
+
 /** One rate-limit window reported by a provider's usage endpoint. */
 export interface UsageWindow {
   /** Window kind: `session` for the short rolling window, `weekly` for the 7-day one. */
@@ -362,10 +416,104 @@ export interface DiscoveredModel {
     efforts: { id: ReasoningEffortId; name: string; description?: string }[]
     defaultEffort?: ReasoningEffortId
   }
+  /** Accepted request modalities the endpoint advertised (e.g. Copilot's vision support flag). */
+  inputModalities?: ('text' | 'image')[]
   /** Claude-specific: which extended-thinking wire shape this model accepts. */
   thinkingType?: 'enabled' | 'adaptive'
   /** Codex-specific: the catalog advertises a fast (priority) service tier. */
   fastTier?: boolean
+  /** Copilot-specific: which upstream protocol the model's endpoints speak. */
+  copilotWire?: 'chat-completions' | 'responses'
+  /**
+   * Copilot-specific: the catalog also lists `/responses` for this model
+   * (dual-protocol entries, e.g. gpt-5.4), so a chat-wire request may reroute
+   * there when it combines function tools with a reasoning effort.
+   */
+  copilotResponses?: boolean
+}
+
+/** Display name for a wire reasoning-effort identifier. */
+export function effortDisplayName(effort: string): string {
+  return effort === 'xhigh' ? 'Extra High' : effort.charAt(0).toUpperCase() + effort.slice(1)
+}
+
+/** The reasoning-block shape every caller passes to {@link mergeReasoning}. */
+export interface ReasoningBlock {
+  efforts: readonly { id: ReasoningEffortId; name: string; description?: string }[]
+  defaultEffort?: ReasoningEffortId
+}
+
+/**
+ * Fold a configured per-model default effort into a reasoning block, keeping
+ * the DSH runtime invariant `defaultEffort ∈ efforts` (the runtime rejects an
+ * unknown default with `INVALID_MODEL_REASONING`).
+ *
+ * A configured level the base set does not advertise is *dropped*, not
+ * appended: for claude/grok/copilot the base is the provider's live catalog,
+ * i.e. the truth about what the model accepts, so honouring a stale override
+ * would put an unsupported effort on every single request instead of letting
+ * the harness reject it before provider I/O. The override then simply falls
+ * back to the provider's own default until the user picks a level the catalog
+ * still lists.
+ *
+ * `extendable` opts into the opposite rule for a base that is a *built-in
+ * fallback* rather than discovered truth (codex, whose static effort list is
+ * known to trail the backend): there, appending the configured level is how a
+ * newly shipped tier becomes selectable at all.
+ * @param configuredDefault - the user-configured default effort id, or undefined.
+ * @param base - the discovered/built-in reasoning block, or undefined.
+ * @param options - `extendable` marks the base as a fallback that may be extended.
+ * @returns the merged block, or undefined when neither side contributes one.
+ */
+export function mergeReasoning(
+  configuredDefault: string | undefined,
+  base: ReasoningBlock | undefined,
+  options?: { extendable?: boolean },
+): DiscoveredModel['reasoning'] | undefined {
+  const detached = base === undefined
+    ? undefined
+    : {
+      efforts: [...base.efforts],
+      ...(base.defaultEffort === undefined ? {} : { defaultEffort: base.defaultEffort }),
+    }
+  if (configuredDefault === undefined) return detached
+  const effort = ReasoningEffortId(configuredDefault)
+  if (base === undefined) {
+    // No capability information at all (catalog unavailable, or a model the
+    // catalog does not cover). Inventing a reasoning block here would claim a
+    // capability nobody advertised; only a fallback-based provider may.
+    return options?.extendable === true
+      ? { efforts: [{ id: effort, name: effortDisplayName(effort) }], defaultEffort: effort }
+      : undefined
+  }
+  if (base.efforts.some(entry => entry.id === effort)) {
+    return { efforts: [...base.efforts], defaultEffort: effort }
+  }
+  if (options?.extendable !== true) return detached
+  return {
+    efforts: [...base.efforts, { id: effort, name: effortDisplayName(effort) }],
+    defaultEffort: effort,
+  }
+}
+
+/**
+ * First account catalog that lists `model` (callers pass default-first).
+ * One failing lookup sits that account out so a sibling's metadata still
+ * resolves — the same isolation as the picker catalog union.
+ */
+export async function discoverAcrossAccounts(
+  accounts: readonly string[],
+  lookup: (account: string) => Promise<DiscoveredModel | undefined>,
+): Promise<DiscoveredModel | undefined> {
+  for (const account of accounts) {
+    try {
+      const found = await lookup(account)
+      if (found !== undefined) return found
+    } catch {
+      // sit out
+    }
+  }
+  return undefined
 }
 
 /** How long a discovered catalog is trusted before re-fetching. */
@@ -398,7 +546,7 @@ export interface CatalogPersistence {
  * while a stale entry refreshes in the background, and only awaits the fetch
  * when nothing is known yet. An optional {@link CatalogPersistence} seeds the
  * last-known state across restarts and receives every successful fetch. A 401
- * during a fetch must call {@link invalidate}.
+ * that still fails after a forced token refresh must call {@link invalidate}.
  */
 export class ModelCatalogCache {
   private entry: CatalogSnapshot | undefined
@@ -407,6 +555,8 @@ export class ModelCatalogCache {
   private seeded: Promise<void> | undefined
   /** Set by {@link invalidate} so an in-flight disk read cannot resurrect dropped state. */
   private seedDisabled = false
+  /** Bumped by {@link invalidate} so a loser in-flight fetch cannot write back. */
+  private generation = 0
 
   constructor(
     private readonly persistence?: CatalogPersistence,
@@ -420,6 +570,15 @@ export class ModelCatalogCache {
   cached(): readonly DiscoveredModel[] | undefined {
     if (this.entry === undefined || Date.now() - this.entry.at >= this.ttlMs) return undefined
     return this.entry.models
+  }
+
+  /**
+   * The last successfully fetched catalog, ignoring TTL. Used to carry
+   * capability metadata forward when a later fetch cannot re-enrich.
+   * @returns the last-known models, or `undefined` when nothing has been stored.
+   */
+  lastKnown(): readonly DiscoveredModel[] | undefined {
+    return this.entry?.models
   }
 
   /** Load the persisted snapshot once; a fetch or invalidate that landed first wins. */
@@ -438,16 +597,22 @@ export class ModelCatalogCache {
 
   /** Run (or join) the single in-flight fetch, updating memory and disk on success. */
   private refresh(fetcher: () => Promise<DiscoveredModel[]>): Promise<DiscoveredModel[]> {
-    this.inflight ??= fetcher()
+    if (this.inflight !== undefined) return this.inflight
+    const gen = this.generation
+    const pending = fetcher()
       .then((models) => {
+        if (this.generation !== gen) return models
         const snapshot: CatalogSnapshot = { at: Date.now(), models }
         this.entry = snapshot
         // Write-through is fire-and-forget: a failed save only costs durability.
         void this.persistence?.save(snapshot).catch(() => undefined)
         return models
       })
-      .finally(() => { this.inflight = undefined })
-    return this.inflight
+      .finally(() => {
+        if (this.generation === gen) this.inflight = undefined
+      })
+    this.inflight = pending
+    return pending
   }
 
   /**
@@ -489,8 +654,59 @@ export class ModelCatalogCache {
 
   /** Drop the cached catalog (e.g. after a 401 proved the credential changed). */
   invalidate(): void {
+    this.generation += 1
     this.entry = undefined
+    this.inflight = undefined
     this.seedDisabled = true
     void this.persistence?.clear().catch(() => undefined)
+  }
+}
+
+/** Whether discovery failed because the stored login is gone. */
+export function isMissingOrInvalidCredential(error: unknown): boolean {
+  return error instanceof LlmError
+    && (error.code === 'MISSING_CREDENTIAL' || error.code === 'INVALID_CREDENTIAL')
+}
+
+/** Whether discovery stopped because the caller cancelled or the timeout fired. */
+export function isDiscoveryAborted(error: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted === true) return true
+  // Only treat abort-shaped errors as cancellation when this call had a signal;
+  // a refresh TimeoutError must not fail the whole picker union.
+  return signal !== undefined
+    && error instanceof Error
+    && (error.name === 'AbortError' || error.name === 'TimeoutError')
+}
+
+/** Whether discovery failed because the access token was rejected. */
+function isDiscoveryAuthFailure(error: unknown): boolean {
+  return (error instanceof OAuthEndpointError && error.status === 401)
+    || (error instanceof LlmError && error.code === 'AUTH')
+}
+
+/**
+ * Run a catalog fetch, retrying once after a forced token refresh when the
+ * first attempt is a 401/AUTH. Only {@link ModelCatalogCache.invalidate}s
+ * when the retry is also an auth failure, so a refresh race cannot erase
+ * last-known capability metadata.
+ */
+export async function discoverOrRetryAuth<T>(
+  session: (forceRefresh?: boolean) => Promise<unknown>,
+  catalog: ModelCatalogCache,
+  run: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await run()
+  } catch (error: unknown) {
+    if (isMissingOrInvalidCredential(error) || !isDiscoveryAuthFailure(error)) throw error
+    try {
+      await session(true)
+      return await run()
+    } catch (retryError: unknown) {
+      if (!isMissingOrInvalidCredential(retryError) && isDiscoveryAuthFailure(retryError)) {
+        catalog.invalidate()
+      }
+      throw retryError
+    }
   }
 }

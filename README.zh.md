@@ -1,4 +1,4 @@
-# dsh-plugin-subscriptions
+# dsh-plugin-subscriptions [![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
 
 [English](README.md) | 中文
 
@@ -14,7 +14,7 @@
 
 ![模型选择器中的订阅模型](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/model-picker.png)
 
-声明了推理等级的模型会在同一菜单里多出**推理等级**选择 —— Codex 系列模型,以及 Grok 4.6 / 4.5(档位和默认值来自各 provider 的实时目录,不是硬编码列表):
+声明了推理等级的模型会在同一菜单里多出**推理等级**选择 —— Codex 系列模型、Grok 4.6 / 4.5,以及 Copilot 的推理模型(档位和默认值来自各 provider 的实时目录,不是硬编码列表;Copilot 的 `capabilities.supports.reasoning_effort` 数组会按协议映射为 chat completions 的 `reasoning_effort` 或 Responses 的 `reasoning.effort`)。同时声明两个 Copilot 端点的模型(gpt-5.4、gpt-5-mini)默认走 chat completions,但请求同时携带函数工具和推理等级时会自动改走 `/responses` —— Copilot 在 chat 线路上拒绝这种组合:
 
 ![推理等级选择器](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/model-effort.png)
 
@@ -41,14 +41,15 @@
 | `codex`  | ChatGPT Plus/Pro | 从实时目录提供 GPT-5.6 Sol、Terra、Luna |
 | `claude` | Claude Pro/Max   | 订阅内所有可用模型(Opus、Sonnet、Haiku、Fable —— 静态目录,随插件更新) |
 | `grok`   | X Premium (xAI)  | 从 `api.x.ai/v1/models` 实时获取(仅对话模型);推理等级来自 Grok CLI 目录(`cli-chat-proxy.grok.com/v1/models`) |
+| `copilot` | GitHub Copilot  | 从 `api.githubcopilot.com/models` 实时获取(两种 wire 的对话模型,含按模型的视觉标记与推理等级);登录使用 OAuth 设备码流程(在 `github.com/login/device` 输入页面显示的验证码) |
 
 只有已登录的 provider 才会出现在会话模型选择器里;登录/退出后列表自动刷新。支持视觉的模型会声明 `['text', 'image']` 输入模态,图片内容会被翻译成各 provider 的 wire 格式。
 
-ChatGPT 模型选择器只显示 GPT-5.6 Sol、Terra、Luna。实时目录、持久化缓存、配置覆盖和内置兜底中的旧模型都会被移除;Claude 和 Grok 的模型目录不受影响。
+ChatGPT 模型选择器只显示 GPT-5.6 Sol、Terra、Luna。实时目录、持久化缓存、配置覆盖、池分层和内置兜底中的旧模型都会被移除;Claude、Grok 和 Copilot 的模型目录不受影响。
 
-已登录的卡片还会显示**订阅用量**——按限额窗口(5 小时会话窗、每周窗,以及计划包含的按模型每周窗)展示已用百分比、进度条和重置时间,并带刷新按钮。Codex 用量来自 `chatgpt.com/backend-api/wham/usage`(同时报告计划类型),Claude 用量来自 `api.anthropic.com/api/oauth/usage`,Grok 用量来自 Grok Build CLI 代理的 `cli-chat-proxy.grok.com/v1/billing`(即 CLI `/usage` 面板的数据源,报告共享每周额度和订阅档位)。
+已登录的卡片还会显示**订阅用量**——按限额窗口(5 小时会话窗、每周窗,以及计划包含的按模型每周窗)展示已用百分比、进度条和重置时间,并带刷新按钮。Codex 用量来自 `chatgpt.com/backend-api/wham/usage`(同时报告计划类型),Claude 用量来自 `api.anthropic.com/api/oauth/usage`,Grok 用量来自 Grok Build CLI 代理的 `cli-chat-proxy.grok.com/v1/billing`(即 CLI `/usage` 面板的数据源,报告共享每周额度和订阅档位)。Copilot 没有用量接口,其卡片不显示用量区块。
 
-宿主提供已认证账号角色时,服务商凭据和服务商级订阅用量仅管理员可管理或查看。子账号仍可使用宿主分配的模型,但浏览器不会显示登录、退出、手动授权或服务商额度控件;直接调用凭据管理或 `usage` RPC 也会被服务端拒绝。
+宿主提供已认证账号角色时,服务商凭据、账号身份、代理设置、模型默认推理等级和服务商级订阅用量仅管理员可管理或查看。子账号仍可使用宿主分配的模型,但浏览器不会显示登录、退出、手动授权、服务商账号或额度控件;服务端也会拒绝对应的直接 RPC 调用。
 
 随 provider 启用自动注册的工具:
 
@@ -114,6 +115,16 @@ GitHub 安装的:重新执行一遍 `add github:V1ki/dsh-plugin-subscriptions` �
 
 未登录时:该 provider 不出现在选择器里;直接请求会报 `MISSING_CREDENTIAL` 并提示去设置页登录,不影响其他功能。
 
+### 多账号
+
+每个 provider 可以登录多个账号:连上第一个之后,卡片会出现「添加账号」按钮(Claude 拆分为「浏览器授权」和「导入 Claude Code」两种)。账号按身份(邮箱/用户名)归档——重复登录同一账号是覆盖更新,不同账号才是新增。浏览器授权以浏览器当前登录的账号为准,要添加不同账号请先在浏览器切换账号,或用无痕窗口走手动授权码。★ 默认账号服务直连路由;池路由会使用所有账号。从 Claude Code 导入的 Claude 账号会与 CLI 的凭据存储保持同步;OAuth 添加的 Claude 账号独立刷新,多个账号不会互相覆盖 Keychain。
+
+### 按模型的默认推理档
+
+**设置 → 订阅**里每个已登录 provider 卡片都有一个可折叠的**默认推理档**区块。默认收起,标题栏直接给出「多少个模型声明了推理档 / 已覆盖多少个」;模型列表(以及它背后的 live 目录查询)只在展开时才加载 —— 这样模型数量很多的 provider(Copilot 动辄几十个)既不会把页面撑长,也不会白跑一次目录查询。展开后,凡声明了推理档的模型各占一行,可选档位就是该 provider live 目录为这个模型声明的档位;此类模型超过 8 个时区块还会给出一个名称筛选框;没有推理档的模型不再一行一条占位,而是合并成一行计数说明。登录了多个账号时,模型列表是该 provider 各账号目录的并集 —— 任一账号声明的模型都会出现;而某个模型可选的档位取自**第一个列出它的账号**(★ 默认账号优先),与会话选择器解析到的一致。
+
+选中某档后,会话模型选择器在切换到该模型时会自动预选该档位,不必再接受 provider 自己的默认值(例如 Claude 只显示 `Default`,Codex 模型跟随 `default_reasoning_level`)。选择「跟随服务商」可清除覆盖。配置存于 `~/.dsh/plugins/subscriptions/model-defaults.json`(权限 0600),重启后依然生效。
+
 ## 配置
 
 ```yaml
@@ -125,7 +136,51 @@ GitHub 安装的:重新执行一遍 `add github:V1ki/dsh-plugin-subscriptions` �
     models:                            # 覆盖实时发现/内置目录
       codex:
         - { id: gpt-5.6-sol, name: GPT-5.6 Sol, contextWindow: 272000, inputModalities: [text, image] }
+      copilot:                         # 手工条目会关闭 Copilot 目录发现
+        - { id: gpt-5.6-sol, wire: responses }   # 仅 copilot:强制指定上游协议
 ```
+
+`wire`（仅 copilot 条目）把模型固定到 `chat-completions` 或 `responses`。不加该字段手工条目照常
+工作——它存在的原因是:实时目录不认识的手工模型否则会默认走 `/chat/completions`，而
+responses-only 系列（gpt-5.5/5.6 等）会拒绝该端点。固定为 `chat-completions` 也会退出上文所述
+tools+effort 的自动改道。
+
+## 模型池
+
+同一订阅下登录了**两个及以上账号**时,选择器显示该 provider **所有账号目录的并集**(按模型 id 去重)。照常在 Claude 组选 `claude-sonnet-5`、在 ChatGPT 组选 `gpt-5.4`——不会多出一个池分组,也不会换 model id。
+
+- **共有模型**：至少两个账号的目录都列出的模型,在这些账号之间 failover(粘性、可按配额调度)。每个账号各自做一次目录发现,Plus 不会被拿去打 Pro 才有的模型。
+- **单账号模型**：只有一个账号目录里有的模型,请求就打到那个账号。即使它不是默认账号,选择器里也会出现。
+- **显式账号列表(`families`)**：覆盖某个目录模型的自动成员(仅同一 provider;跨 provider 的成员会被忽略)。可钉 `account`,省略则用默认账号。
+- **档位额外项(`tiers`,可选)**：额外的选择器条目,failover 可以跨模型;出现在首个成员所在的 provider 分组。不会自动创建。
+
+成员选择按会话粘性(prompt 缓存不失效),两种策略:`priority`(按顺序取第一个健康成员)和 `quota_aware`(默认——按"必需消耗速率 = 剩余配额 / 距重置时间"给成员打分,快重置且剩余多的窗口优先被用掉而不是浪费;粘性成员除非被挑战者以 `switchMargin` 倍分差击败否则不换)。任一用量窗口超过 95% 的成员会被硬门槛挡下;首个流式 chunk 之前的失败会记冷却并切换下一家(provider 给了 `retry-after` 就用它)——配额与认证类失败按整个账号冷却(配额是账号级的;Claude 的分模型窗口则只冷却出错成员),瞬时服务端失败只冷却出错成员。Copilot 没有用量接口,恒为 0 分,自然充当最后的保底。
+
+```yaml
+- id: llm-subscriptions
+  name: dsh-plugin-subscriptions
+  config:
+    pool:
+      enabled: true                   # 默认开;需同一 provider ≥2 个账号
+      strategy: quota_aware           # 或 priority
+      switchMargin: 2                 # quota_aware 的滞后切换倍率
+      autoAccounts: true              # 把该 provider 各账号自动池到每个目录模型
+      families:                       # 某个目录模型的显式账号列表(同一 provider)
+        claude-sonnet-5:
+          - { provider: claude, model: claude-sonnet-5 }                   # 默认账号
+          - { provider: claude, account: bob@example.com, model: claude-sonnet-5 }
+      tiers:                          # 可选的额外选择器条目
+        smart:
+          - { provider: claude, model: claude-sonnet-5 }
+          - { provider: codex, model: gpt-5.6-sol }
+          - { provider: grok, model: grok-4.6 }
+```
+
+## 代理
+
+所有订阅相关请求 —— token 交换、模型 API 流式调用、用量查询、模型目录发现,以及 `x_search` / `image_generate` / `video_generate` 工具 —— 都可以通过 HTTP(S) 代理发出。在 **设置 → 订阅 → 代理 → 配置…** 中设置:勾选启用,填写代理地址(`http://127.0.0.1:7890`)、可选用户名/密码,以及可选的逗号分隔绕过列表(保持直连的主机名,如 `127.0.0.1`、`localhost`、`*.example.com`)。密码保存在 `~/.dsh/plugins/subscriptions/proxy.json`(权限 0600),不会回传给浏览器;「测试」按钮会用当前配置探测一次端点,显示 HTTP 状态码与耗时。
+
+保存后立即对后续请求生效,无需重启。OAuth 授权页在浏览器中打开,走浏览器/系统自身的代理设置,不受此配置影响;不支持 socks 代理。
 
 ## 开发
 
@@ -143,7 +198,7 @@ pnpm test      # 编译后跑 node --test 单测
 
 - `src/index.ts` —— 插件入口:配置 schema、adapter 注册、登录态变更通告、RPC 接线
 - `src/auth/` —— PKCE/JWT 工具、token 存储、OAuth 流程引擎(临时本地回调服务)、Claude Code 凭据读取器(Keychain/文件)、已认证的 `/api/subscriptions-auth/*` RPC 端点
-- `src/providers/` —— 各 provider 的 OAuth 常量/换发/刷新 + `LlmAdapter` 实现
+- `src/providers/` —— 各 provider 的 OAuth 常量/换发/刷新 + `LlmAdapter` 实现,多账号 token 管理(`accounts.ts`),以及模型池(`pool.ts` + `pool-health.ts` / `pool-usage.ts` / `pool-family.ts`)
 - `src/translate/` —— dsh `Message[]` 与 OpenAI Responses / Anthropic Messages 格式互转,SSE → `StreamChunk`
 - `src/tools/` —— `x_search`、`image_generate` 与 `video_generate`
 - `src/client/` —— 设置 → 订阅页面(浏览器面,中英文,跟随明暗主题)

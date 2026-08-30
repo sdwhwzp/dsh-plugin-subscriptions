@@ -15,6 +15,8 @@ import type {
 import { decodeJwtPayload } from '../auth/jwt.js'
 import type { FlowSpec } from '../auth/oauth-flow.js'
 import type { GrokSession } from '../auth/store.js'
+import type { ProviderId } from '../auth/store.js'
+import type { PoolAdapter } from './pool.js'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { resolveImages } from '../translate/resolved.js'
 import { streamResponses, toResponsesInput, toResponsesTools } from '../translate/responses.js'
@@ -22,11 +24,16 @@ import {
   httpLlmError,
   idleWatchdog,
   mapFetchFailure,
+  mergeReasoning,
   ModelCatalogCache,
+  discoverAcrossAccounts,
+  discoverOrRetryAuth,
+  isDiscoveryAborted,
+  isMissingOrInvalidCredential,
   oauthEndpointError,
   OAuthEndpointError,
-  TokenManager,
 } from './common.js'
+import { AccountTokenManager, DISCOVERY_TIMEOUT_MS, unionAccountCatalogs } from './accounts.js'
 import type {
   CatalogPersistence,
   DiscoveredModel,
@@ -35,6 +42,7 @@ import type {
   ProviderUsage,
   UsageWindow,
 } from './common.js'
+import { proxiedFetch } from '../http.js'
 
 export const GROK_CLIENT_ID = 'b1a00492-073a-47ea-816f-4c329264a828'
 export const GROK_DISCOVERY_URL = 'https://auth.x.ai/.well-known/openid-configuration'
@@ -75,7 +83,7 @@ let discoveryCache: GrokDiscovery | undefined
  */
 export async function grokDiscovery(): Promise<GrokDiscovery> {
   if (discoveryCache !== undefined) return discoveryCache
-  const response = await fetch(GROK_DISCOVERY_URL)
+  const response = await proxiedFetch(GROK_DISCOVERY_URL)
   if (!response.ok) throw await oauthEndpointError(response, 'grok OIDC discovery')
   const document = await response.json() as {
     authorization_endpoint?: string
@@ -206,7 +214,7 @@ export async function exchangeGrokCode(
   challenge: string,
 ): Promise<GrokSession> {
   const discovery = await grokDiscovery()
-  const response = await fetch(discovery.tokenEndpoint, {
+  const response = await proxiedFetch(discovery.tokenEndpoint, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -236,7 +244,7 @@ export async function exchangeGrokCode(
  * @returns the fresh session to store.
  */
 export async function refreshGrok(session: GrokSession): Promise<GrokSession> {
-  const response = await fetch(session.tokenEndpoint, {
+  const response = await proxiedFetch(session.tokenEndpoint, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -303,7 +311,7 @@ interface GrokBillingConfig {
  */
 export async function fetchGrokUsage(
   session: GrokSession,
-  fetchFn: FetchFn = fetch,
+  fetchFn: FetchFn = proxiedFetch,
   signal?: AbortSignal,
 ): Promise<ProviderUsage> {
   const response = await fetchFn(GROK_BILLING_URL, {
@@ -408,11 +416,13 @@ function grokCliReasoning(entry: GrokCliWireModel): NonNullable<DiscoveredModel[
  * Fetch the CLI catalog and index its per-model metadata by model id.
  * @param session - the stored session (used as-is; never refreshed here).
  * @param fetchFn - fetch implementation (injectable for tests).
+ * @param signal - caller cancellation (pool-assembly timeout).
  * @returns model id → contributed metadata.
  */
 export async function fetchGrokCliCatalog(
   session: GrokSession,
-  fetchFn: FetchFn = fetch,
+  fetchFn: FetchFn = proxiedFetch,
+  signal?: AbortSignal,
 ): Promise<Map<string, GrokCliModelMeta>> {
   const response = await fetchFn(GROK_CLI_MODELS_URL, {
     headers: {
@@ -422,6 +432,7 @@ export async function fetchGrokCliCatalog(
       'accept': 'application/json',
       ...attributionHeaders(),
     },
+    ...signal === undefined ? {} : { signal },
   })
   if (!response.ok) throw await oauthEndpointError(response, 'grok CLI catalog')
   const payload = await response.json() as { data?: GrokCliWireModel[] }
@@ -455,21 +466,46 @@ function isChatModel(id: string): boolean {
 }
 
 /**
+ * CLI-contributed fields carried forward from a previously discovered model.
+ * @param prior - the last-known entry for this id, if any.
+ * @returns enrichment to apply when the live CLI catalog cannot contribute.
+ */
+function grokPriorMeta(prior: DiscoveredModel | undefined): GrokCliModelMeta {
+  if (prior === undefined) return {}
+  return {
+    ...(prior.name.length > 0 ? { name: prior.name } : {}),
+    ...(prior.description === undefined ? {} : { description: prior.description }),
+    ...(prior.contextWindow === undefined ? {} : { contextWindow: prior.contextWindow }),
+    ...(prior.reasoning === undefined ? {} : { reasoning: prior.reasoning }),
+  }
+}
+
+/**
  * Fetch the live grok model list, enriched with the CLI catalog's per-model
  * metadata (display name, context window, reasoning efforts). The api.x.ai
  * list stays authoritative for which models exist; the CLI catalog is
  * enrichment only, so its failure degrades to a plain list instead of taking
- * discovery down — models it does not cover simply expose no efforts.
+ * discovery down. When enrichment is missing, last-known capability metadata
+ * is carried forward so a transient CLI outage cannot strip efforts a
+ * session already selected.
  * @param session - the stored session (used as-is; never refreshed here).
  * @param fetchFn - fetch implementation (injectable for tests).
  * @param onWarn - warning sink for a failed CLI catalog fetch.
+ * @param previous - last-known catalog used to keep enrichment when the CLI
+ *   catalog is down or omits a model.
+ * @param signal - caller cancellation (pool-assembly timeout).
  * @returns discovered chat models in endpoint order.
  */
 export async function fetchGrokModels(
   session: GrokSession,
-  fetchFn: FetchFn = fetch,
+  fetchFn: FetchFn = proxiedFetch,
   onWarn?: (message: string) => void,
+  previous?: readonly DiscoveredModel[],
+  signal?: AbortSignal,
 ): Promise<DiscoveredModel[]> {
+  const previousById = previous === undefined || previous.length === 0
+    ? undefined
+    : new Map(previous.map(model => [model.id, model]))
   const [response, cliCatalog] = await Promise.all([
     fetchFn(GROK_MODELS_URL, {
       headers: {
@@ -477,9 +513,13 @@ export async function fetchGrokModels(
         'accept': 'application/json',
         ...attributionHeaders(),
       },
+      ...signal === undefined ? {} : { signal },
     }),
-    fetchGrokCliCatalog(session, fetchFn).catch((error: unknown) => {
-      onWarn?.(`grok CLI catalog fetch failed; reasoning efforts are unavailable (${errorChain(error)})`)
+    fetchGrokCliCatalog(session, fetchFn, signal).catch((error: unknown) => {
+      if (isDiscoveryAborted(error, signal)) throw error
+      onWarn?.(previousById === undefined
+        ? `grok CLI catalog fetch failed; reasoning efforts are unavailable (${errorChain(error)})`
+        : `grok CLI catalog fetch failed; keeping last-known reasoning efforts (${errorChain(error)})`)
       return undefined
     }),
   ])
@@ -492,7 +532,12 @@ export async function fetchGrokModels(
     if (typeof entry.id !== 'string' || entry.id.length === 0 || seen.has(entry.id)) continue
     if (!isChatModel(entry.id)) continue
     seen.add(entry.id)
-    discovered.push({ id: entry.id, name: entry.id, ...cliCatalog?.get(entry.id) })
+    const cli = cliCatalog?.get(entry.id)
+    discovered.push({
+      id: entry.id,
+      name: entry.id,
+      ...(cli ?? grokPriorMeta(previousById?.get(entry.id))),
+    })
   }
   // An empty catalog from a 200 response is treated as a discovery failure so
   // the adapter falls back to the static catalog instead of vanishing from
@@ -505,7 +550,9 @@ export async function fetchGrokModels(
 export interface GrokAdapterOptions {
   models: readonly ModelEntry[]
   streamIdleTimeoutMs: number
-  tokens: TokenManager<GrokSession>
+  tokens: AccountTokenManager<GrokSession>
+  /** Late-bound pool facade (wired after adapter construction); pools list under their first member's provider. */
+  pool?: () => PoolAdapter | undefined
   /** Whether to fetch the live catalog when logged in (false when config `models` overrides). */
   discovery: boolean
   /** Warning sink for discovery failures that fall back to the static catalog. */
@@ -516,11 +563,21 @@ export interface GrokAdapterOptions {
   resolveAttachments?: () => AttachmentStore | undefined
   /** Durable catalog store seeding capability metadata across restarts. */
   catalogStore?: CatalogPersistence
+  /**
+   * Per-model default reasoning effort override (the Settings page's picker).
+   * Returns the user-configured default for one model, or undefined to follow
+   * the provider's own default.
+   */
+  defaultEffortOf?: (model: string) => string | undefined
 }
 
 /** Grok wire adapter: one instance serves the `grok` provider route. */
 export class GrokAdapter extends LlmAdapter {
   private readonly catalog: ModelCatalogCache
+  /** In-memory catalogs for non-default accounts (the persisted cache is the default's). */
+  private readonly accountCatalogs = new Map<string, ModelCatalogCache>()
+  /** Account whose snapshot currently lives in {@link catalog}; cleared on default change. */
+  private catalogOwner: string | undefined
 
   constructor(private readonly options: GrokAdapterOptions) {
     super()
@@ -528,8 +585,56 @@ export class GrokAdapter extends LlmAdapter {
   }
 
   /** Discovery fetcher: resolves the session through the refresh-aware path. */
-  private async fetchCatalog(): Promise<DiscoveredModel[]> {
-    return fetchGrokModels(await this.options.tokens.session(), this.options.fetchFn, this.options.onWarn)
+  private async fetchCatalog(account?: string, signal?: AbortSignal): Promise<DiscoveredModel[]> {
+    const lastKnown = account === undefined || account === await this.options.tokens.defaultAccount()
+      ? this.catalog.lastKnown()
+      : this.accountCatalogs.get(account)?.lastKnown()
+    return fetchGrokModels(
+      await this.options.tokens.session(account),
+      this.options.fetchFn,
+      this.options.onWarn,
+      lastKnown,
+      signal,
+    )
+  }
+
+  /** Drop cached catalogs after login/logout so the next list does not reuse a stale plan. */
+  clearAccountCatalog(account?: string): void {
+    if (account === undefined) this.accountCatalogs.clear()
+    else this.accountCatalogs.delete(account)
+    if (account === undefined || this.catalogOwner === account || this.catalogOwner === undefined) {
+      this.catalogOwner = undefined
+      this.catalog.invalidate()
+    }
+  }
+
+  /** Persisted cache for the default account; a throwaway cache for any other. */
+  private async catalogFor(account?: string): Promise<ModelCatalogCache> {
+    const defaultKey = await this.options.tokens.defaultAccount()
+    const key = account ?? defaultKey
+    if (key === undefined || key === defaultKey) {
+      if (this.catalogOwner !== undefined && this.catalogOwner !== defaultKey) {
+        this.catalog.invalidate()
+      }
+      this.catalogOwner = defaultKey
+      return this.catalog
+    }
+    let cache = this.accountCatalogs.get(key)
+    if (cache === undefined) {
+      cache = new ModelCatalogCache()
+      this.accountCatalogs.set(key, cache)
+    }
+    return cache
+  }
+
+  private listed(provider: string, discovered: readonly DiscoveredModel[]): LlmModelInfo[] {
+    return discovered.map(model => ({
+      provider,
+      id: model.id,
+      name: model.name,
+      ...model.description === undefined ? {} : { description: model.description },
+      inputModalities: grokModalities(model.id),
+    }))
   }
 
   override providerInfo(provider: string): LlmProviderInfo {
@@ -546,28 +651,45 @@ export class GrokAdapter extends LlmAdapter {
   }
 
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
-    // Not logged in → empty catalog, so the web picker drops the provider.
-    const session = await this.options.tokens.peek()
-    if (session === undefined) return []
+    const own = await this.listOwnModels(provider)
+    const pool = this.options.pool?.()
+    if (pool === undefined) return own
+    const extra = await pool.modelsForProvider(provider as ProviderId)
+    const seen = new Set(own.map(model => model.id))
+    // Account pools reuse the catalog row; only configured tiers are extra.
+    return [...own, ...extra.filter(model => !seen.has(model.id))]
+  }
+
+  /** The provider's own catalog: union of every account, or one account when named. */
+  async listOwnModels(provider: string, account?: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]> {
+    if (account === undefined) {
+      const accounts = (await this.options.tokens.list()).map(entry => entry.key)
+      if (accounts.length === 0) return []
+      return unionAccountCatalogs(
+        accounts,
+        (key, accountSignal) => this.listOwnModels(provider, key, accountSignal),
+        { timeoutMs: DISCOVERY_TIMEOUT_MS, ...signal === undefined ? {} : { signal } },
+      )
+    }
+    if (!await this.options.tokens.hasSession(account)) {
+      return []
+    }
     if (!this.options.discovery) return this.staticModels(provider)
+    const catalog = await this.catalogFor(account)
     try {
       // The fetcher runs only on a cache miss, and resolves the session
       // through the refresh-aware path so an expired access token renews here
       // instead of failing discovery into the static fallback.
-      const discovered = await this.catalog.get(() => this.fetchCatalog())
-      return discovered.map(model => ({
-        provider,
-        id: model.id,
-        name: model.name,
-        ...model.description === undefined ? {} : { description: model.description },
-        inputModalities: grokModalities(model.id),
-      }))
+      return this.listed(provider, await discoverOrRetryAuth(
+        force => this.options.tokens.session(account, force),
+        catalog,
+        () => catalog.get(() => this.fetchCatalog(account, signal)),
+      ))
     } catch (error: unknown) {
+      if (isDiscoveryAborted(error, signal)) throw error
       // A permanent refresh failure deletes the stored session: the provider
       // is logged out, so hide it instead of showing a stale static catalog.
-      if (error instanceof LlmError
-        && (error.code === 'MISSING_CREDENTIAL' || error.code === 'INVALID_CREDENTIAL')) return []
-      if (error instanceof OAuthEndpointError && error.status === 401) this.catalog.invalidate()
+      if (isMissingOrInvalidCredential(error)) return []
       this.options.onWarn?.(
         `grok model discovery failed; using the built-in catalog (${errorChain(error)})`,
       )
@@ -585,13 +707,32 @@ export class GrokAdapter extends LlmAdapter {
    */
   private async discovered(model: string): Promise<DiscoveredModel | undefined> {
     if (!this.options.discovery) return undefined
-    const models = await this.catalog.resolve(() => this.fetchCatalog())
-    return models?.find(entry => entry.id === model)
+    const accounts = (await this.options.tokens.list()).map(entry => entry.key)
+    return discoverAcrossAccounts(accounts, async account => {
+      const catalog = await this.catalogFor(account)
+      const models = await catalog.resolve(() => this.fetchCatalog(account))
+      return models?.find(entry => entry.id === model)
+    })
   }
 
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    const pool = this.options.pool?.()
+    if (pool !== undefined && await pool.owns(provider as ProviderId, model)) {
+      return pool.resolveModel(provider, model)
+    }
+    return this.resolveOwnModel(provider, model)
+  }
+
+  /** Capability resolution of the provider's own models (the pool resolves members here). */
+  async resolveOwnModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     const discovered = await this.discovered(model)
     const configured = this.options.models.find(entry => entry.id === model)
+    // Efforts come from the discovered CLI catalog; models it does not
+    // cover expose none, so the harness rejects explicit efforts before
+    // provider I/O instead of the API 400ing. A configured default effort
+    // still merges in: the picker then preselects it even for models the
+    // CLI catalog does not cover.
+    const reasoning = mergeReasoning(this.options.defaultEffortOf?.(model), discovered?.reasoning)
     return {
       provider,
       id: model,
@@ -600,21 +741,32 @@ export class GrokAdapter extends LlmAdapter {
       inputModalities: configured?.inputModalities ?? grokModalities(model),
       context: { contextWindow: discovered?.contextWindow ?? configured?.contextWindow ?? GROK_CONTEXT_WINDOW },
       defaultMaxTokens: configured?.maxTokens ?? GROK_DEFAULT_MAX_TOKENS,
-      // Efforts come from the discovered CLI catalog; models it does not
-      // cover expose none, so the harness rejects explicit efforts before
-      // provider I/O instead of the API 400ing.
-      ...discovered?.reasoning === undefined ? {} : { reasoning: discovered.reasoning },
+      ...reasoning === undefined ? {} : { reasoning },
     }
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const pool = this.options.pool?.()
+    if (pool !== undefined && await pool.owns(options.provider as ProviderId, options.model)) {
+      yield* pool.stream(options)
+      return
+    }
+    yield* this.streamCore(options)
+  }
+
+  /** Pool seam: stream through one specific account instead of the default. */
+  streamAccount(options: GenerateOptions, account: string): AsyncIterable<StreamChunk> {
+    return this.streamCore(options, account)
+  }
+
+  private async *streamCore(options: GenerateOptions, account?: string): AsyncIterable<StreamChunk> {
     const watchdog = idleWatchdog(options.signal, this.options.streamIdleTimeoutMs)
     try {
-      let session = await this.options.tokens.session()
+      let session = await this.options.tokens.session(account)
       let response = await this.request(options, session, watchdog.signal)
       if (response.status === 401) {
         // One forced refresh + retry on an unexpired-but-rejected token.
-        session = await this.options.tokens.session(true)
+        session = await this.options.tokens.session(account, true)
         response = await this.request(options, session, watchdog.signal)
       }
       if (!response.ok) throw await httpLlmError(response, 'grok API')
@@ -650,7 +802,7 @@ export class GrokAdapter extends LlmAdapter {
       store: false,
       stream: true,
     }
-    return fetch(GROK_API_URL, {
+    return proxiedFetch(GROK_API_URL, {
       method: 'POST',
       headers: {
         'authorization': `Bearer ${session.accessToken}`,

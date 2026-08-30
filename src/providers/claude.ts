@@ -15,9 +15,13 @@ import type {
 } from '@deepseek-ai/dsh-llm'
 import type { FlowSpec } from '../auth/oauth-flow.js'
 import type { ClaudeSession } from '../auth/store.js'
+import type { ProviderId } from '../auth/store.js'
+import type { PoolAdapter } from './pool.js'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { resolveImages } from '../translate/resolved.js'
+import type { TranslatableMessage } from '../translate/resolved.js'
 import {
+  markMessageCache,
   streamAnthropic,
   toAnthropicMessages,
   toAnthropicSystem,
@@ -27,12 +31,18 @@ import {
   httpLlmError,
   idleWatchdog,
   mapFetchFailure,
+  mergeReasoning,
   ModelCatalogCache,
+  discoverAcrossAccounts,
+  discoverOrRetryAuth,
+  isDiscoveryAborted,
+  isMissingOrInvalidCredential,
   oauthEndpointError,
   OAuthEndpointError,
-  TokenManager,
 } from './common.js'
+import { AccountTokenManager, DISCOVERY_TIMEOUT_MS, unionAccountCatalogs } from './accounts.js'
 import type { CatalogPersistence, DiscoveredModel, FetchFn, ModelEntry, ProviderUsage, UsageWindow } from './common.js'
+import { proxiedFetch } from '../http.js'
 
 export const CLAUDE_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
 export const CLAUDE_AUTHORIZE_URL = 'https://claude.ai/oauth/authorize'
@@ -117,7 +127,7 @@ interface ClaudeTokenResponse {
 /** Best-effort account profile; login must not fail when this does. */
 async function fetchClaudeProfile(accessToken: string): Promise<Pick<ClaudeSession, 'emailAddress' | 'subscriptionType'>> {
   try {
-    const response = await fetch(CLAUDE_PROFILE_URL, {
+    const response = await proxiedFetch(CLAUDE_PROFILE_URL, {
       headers: { authorization: `Bearer ${accessToken}` },
     })
     if (!response.ok) return {}
@@ -175,7 +185,7 @@ export async function exchangeClaudeCode(
   redirectUri: string,
   state: string,
 ): Promise<ClaudeSession> {
-  const response = await fetch(CLAUDE_TOKEN_URL, {
+  const response = await proxiedFetch(CLAUDE_TOKEN_URL, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -197,7 +207,7 @@ export async function exchangeClaudeCode(
  * @returns the fresh session to store.
  */
 export async function refreshClaude(session: ClaudeSession): Promise<ClaudeSession> {
-  const response = await fetch(CLAUDE_TOKEN_URL, {
+  const response = await proxiedFetch(CLAUDE_TOKEN_URL, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -292,7 +302,7 @@ function claudeLimitsWindows(value: unknown): UsageWindow[] {
  */
 export async function fetchClaudeUsage(
   session: ClaudeSession,
-  fetchFn: FetchFn = fetch,
+  fetchFn: FetchFn = proxiedFetch,
   signal?: AbortSignal,
 ): Promise<ProviderUsage> {
   const response = await fetchFn(CLAUDE_USAGE_URL, {
@@ -359,10 +369,11 @@ function claudeReasoning(capabilities: ClaudeModelCapabilities | undefined): Dis
   return efforts.length > 0 ? { efforts } : undefined
 }
 
-/** Fetch the live model catalog from the subscription endpoint. */
+/** Fetch the live model catalog from the subscription endpoint. `signal` cancels the request. */
 export async function fetchClaudeModels(
   session: ClaudeSession,
-  fetchFn: FetchFn = fetch,
+  fetchFn: FetchFn = proxiedFetch,
+  signal?: AbortSignal,
 ): Promise<DiscoveredModel[]> {
   const response = await fetchFn(CLAUDE_MODELS_URL, {
     headers: {
@@ -372,6 +383,7 @@ export async function fetchClaudeModels(
       'anthropic-dangerous-direct-browser-access': 'true',
       'accept': 'application/json',
     },
+    ...signal === undefined ? {} : { signal },
   })
   if (!response.ok) throw await httpLlmError(response, 'claude models API')
   const payload = await response.json() as {
@@ -402,7 +414,9 @@ export async function fetchClaudeModels(
 export interface ClaudeAdapterOptions {
   models: readonly ModelEntry[]
   streamIdleTimeoutMs: number
-  tokens: TokenManager<ClaudeSession>
+  tokens: AccountTokenManager<ClaudeSession>
+  /** Late-bound pool facade (wired after adapter construction); pools list under their first member's provider. */
+  pool?: () => PoolAdapter | undefined
   /** Whether to fetch the live catalog when logged in (false when config `models` overrides). */
   discovery: boolean
   fetchFn?: FetchFn
@@ -413,6 +427,12 @@ export interface ClaudeAdapterOptions {
   resolveAttachments?: () => AttachmentStore | undefined
   /** Durable catalog store seeding capability metadata across restarts. */
   catalogStore?: CatalogPersistence
+  /**
+   * Per-model default reasoning effort override (the Settings page's picker).
+   * Returns the user-configured default for one model, or undefined to follow
+   * the provider's own default.
+   */
+  defaultEffortOf?: (model: string) => string | undefined
 }
 
 /**
@@ -427,23 +447,99 @@ const CLAUDE_RETRY_JITTER_RATIO = 0.2
 /** The Claude 4.5 family accepts image input. */
 const CLAUDE_MODALITIES: readonly ('text' | 'image')[] = ['text', 'image']
 
+/**
+ * Assemble the Anthropic request body.
+ *
+ * Extracted from the adapter so the wire shape — cache breakpoints above all —
+ * is testable without a network round trip. The message array is marked before
+ * it is placed so the breakpoints land on the blocks the body ships: one on the
+ * last `system` block (covering `tools` + `system`, which render ahead of it)
+ * and up to three across the history, Anthropic's four-slot maximum.
+ * @param options - the generate request.
+ * @param messages - conversation messages with images already resolved.
+ * @param maxTokens - the resolved output cap.
+ * @param thinking - the thinking parameter, when the model takes one.
+ * @param effort - the reasoning effort, when the model advertises efforts.
+ * @returns the JSON body to POST.
+ */
+export function claudeRequestBody(
+  options: GenerateOptions,
+  messages: readonly TranslatableMessage[],
+  maxTokens: number,
+  thinking?: Record<string, unknown>,
+  effort?: string,
+): Record<string, unknown> {
+  const anthropicMessages = toAnthropicMessages(messages)
+  markMessageCache(anthropicMessages)
+  return {
+    model: options.model,
+    max_tokens: maxTokens,
+    system: toAnthropicSystem(options.system, messages),
+    messages: anthropicMessages,
+    ...options.tools !== undefined && options.tools.length > 0
+      ? { tools: toAnthropicTools(options.tools) }
+      : {},
+    ...thinking === undefined ? {} : { thinking },
+    ...effort === undefined ? {} : { output_config: { effort } },
+    stream: true,
+    ...options.sessionId !== undefined ? { metadata: { user_id: String(options.sessionId) } } : {},
+  }
+}
+
 /** Claude wire adapter: one instance serves the `claude` provider route. */
 export class ClaudeAdapter extends LlmAdapter {
   private readonly catalog: ModelCatalogCache
+  /** In-memory catalogs for non-default accounts (the persisted cache is the default's). */
+  private readonly accountCatalogs = new Map<string, ModelCatalogCache>()
+  /** Account whose snapshot currently lives in {@link catalog}; cleared on default change. */
+  private catalogOwner: string | undefined
 
   constructor(private readonly options: ClaudeAdapterOptions) {
     super()
     this.catalog = new ModelCatalogCache(options.catalogStore)
   }
 
-  private async fetchCatalog(): Promise<DiscoveredModel[]> {
-    return fetchClaudeModels(await this.options.tokens.session(), this.options.fetchFn)
+  private async fetchCatalog(account?: string, signal?: AbortSignal): Promise<DiscoveredModel[]> {
+    return fetchClaudeModels(await this.options.tokens.session(account), this.options.fetchFn, signal)
+  }
+
+  /** Drop cached catalogs after login/logout so the next list does not reuse a stale plan. */
+  clearAccountCatalog(account?: string): void {
+    if (account === undefined) this.accountCatalogs.clear()
+    else this.accountCatalogs.delete(account)
+    if (account === undefined || this.catalogOwner === account || this.catalogOwner === undefined) {
+      this.catalogOwner = undefined
+      this.catalog.invalidate()
+    }
+  }
+
+  /** Persisted cache for the default account; a throwaway cache for any other. */
+  private async catalogFor(account?: string): Promise<ModelCatalogCache> {
+    const defaultKey = await this.options.tokens.defaultAccount()
+    const key = account ?? defaultKey
+    if (key === undefined || key === defaultKey) {
+      if (this.catalogOwner !== undefined && this.catalogOwner !== defaultKey) {
+        this.catalog.invalidate()
+      }
+      this.catalogOwner = defaultKey
+      return this.catalog
+    }
+    let cache = this.accountCatalogs.get(key)
+    if (cache === undefined) {
+      cache = new ModelCatalogCache()
+      this.accountCatalogs.set(key, cache)
+    }
+    return cache
   }
 
   private async discovered(model: string): Promise<DiscoveredModel | undefined> {
     if (!this.options.discovery) return undefined
-    const models = await this.catalog.resolve(() => this.fetchCatalog())
-    return models?.find(entry => entry.id === model)
+    const accounts = (await this.options.tokens.list()).map(entry => entry.key)
+    return discoverAcrossAccounts(accounts, async account => {
+      const catalog = await this.catalogFor(account)
+      const models = await catalog.resolve(() => this.fetchCatalog(account))
+      return models?.find(entry => entry.id === model)
+    })
   }
 
   private staticModels(provider: string): LlmModelInfo[] {
@@ -473,10 +569,37 @@ export class ClaudeAdapter extends LlmAdapter {
   }
 
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
-    if (await this.options.tokens.peek() === undefined) return []
+    const own = await this.listOwnModels(provider)
+    const pool = this.options.pool?.()
+    if (pool === undefined) return own
+    const extra = await pool.modelsForProvider(provider as ProviderId)
+    const seen = new Set(own.map(model => model.id))
+    // Account pools reuse the catalog row; only configured tiers are extra.
+    return [...own, ...extra.filter(model => !seen.has(model.id))]
+  }
+
+  /** The provider's own catalog: union of every account, or one account when named. */
+  async listOwnModels(provider: string, account?: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]> {
+    if (account === undefined) {
+      const accounts = (await this.options.tokens.list()).map(entry => entry.key)
+      if (accounts.length === 0) return []
+      return unionAccountCatalogs(
+        accounts,
+        (key, accountSignal) => this.listOwnModels(provider, key, accountSignal),
+        { timeoutMs: DISCOVERY_TIMEOUT_MS, ...signal === undefined ? {} : { signal } },
+      )
+    }
+    if (!await this.options.tokens.hasSession(account)) {
+      return []
+    }
     if (!this.options.discovery) return this.staticModels(provider)
+    const catalog = await this.catalogFor(account)
     try {
-      const models = await this.catalog.get(() => this.fetchCatalog())
+      const models = await discoverOrRetryAuth(
+        force => this.options.tokens.session(account, force),
+        catalog,
+        () => catalog.get(() => this.fetchCatalog(account, signal)),
+      )
       return models.map(model => ({
         provider,
         id: model.id,
@@ -484,9 +607,8 @@ export class ClaudeAdapter extends LlmAdapter {
         inputModalities: CLAUDE_MODALITIES,
       }))
     } catch (error: unknown) {
-      if (error instanceof LlmError
-        && (error.code === 'MISSING_CREDENTIAL' || error.code === 'INVALID_CREDENTIAL')) return []
-      if (error instanceof LlmError && error.code === 'AUTH') this.catalog.invalidate()
+      if (isDiscoveryAborted(error, signal)) throw error
+      if (isMissingOrInvalidCredential(error)) return []
       this.options.onWarn?.(
         `claude model discovery failed; using the built-in catalog (${errorChain(error)})`,
       )
@@ -495,9 +617,18 @@ export class ClaudeAdapter extends LlmAdapter {
   }
 
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    const pool = this.options.pool?.()
+    if (pool !== undefined && await pool.owns(provider as ProviderId, model)) {
+      return pool.resolveModel(provider, model)
+    }
+    return this.resolveOwnModel(provider, model)
+  }
+
+  /** Capability resolution of the provider's own models (the pool resolves members here). */
+  async resolveOwnModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     const disc = await this.discovered(model)
     const configured = this.options.models.find(entry => entry.id === model)
-    const reasoning = disc?.reasoning
+    const reasoning = mergeReasoning(this.options.defaultEffortOf?.(model), disc?.reasoning)
     return {
       provider,
       id: model,
@@ -512,12 +643,26 @@ export class ClaudeAdapter extends LlmAdapter {
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const pool = this.options.pool?.()
+    if (pool !== undefined && await pool.owns(options.provider as ProviderId, options.model)) {
+      yield* pool.stream(options)
+      return
+    }
+    yield* this.streamCore(options)
+  }
+
+  /** Pool seam: stream through one specific account instead of the default. */
+  streamAccount(options: GenerateOptions, account: string): AsyncIterable<StreamChunk> {
+    return this.streamCore(options, account)
+  }
+
+  private async *streamCore(options: GenerateOptions, account?: string): AsyncIterable<StreamChunk> {
     const watchdog = idleWatchdog(options.signal, this.options.streamIdleTimeoutMs)
     try {
-      let session = await this.options.tokens.session()
+      let session = await this.options.tokens.session(account)
       let response = await this.request(options, session, watchdog.signal)
       if (response.status === 401) {
-        session = await this.options.tokens.session(true)
+        session = await this.options.tokens.session(account, true)
         response = await this.request(options, session, watchdog.signal)
       }
       if (!response.ok) throw await httpLlmError(response, 'claude API')
@@ -557,22 +702,10 @@ export class ClaudeAdapter extends LlmAdapter {
     const disc = await this.discovered(options.model)
     const thinking = this.thinkingParam(disc?.thinkingType, maxTokens)
     const effort = options.reasoningEffort !== undefined && disc?.reasoning !== undefined
-      ? { output_config: { effort: String(options.reasoningEffort) } }
-      : {}
-    const body = {
-      model: options.model,
-      max_tokens: maxTokens,
-      system: toAnthropicSystem(options.system, messages),
-      messages: toAnthropicMessages(messages),
-      ...options.tools !== undefined && options.tools.length > 0
-        ? { tools: toAnthropicTools(options.tools) }
-        : {},
-      ...thinking === undefined ? {} : { thinking },
-      ...effort,
-      stream: true,
-      ...options.sessionId !== undefined ? { metadata: { user_id: String(options.sessionId) } } : {},
-    }
-    return fetch(CLAUDE_API_URL, {
+      ? String(options.reasoningEffort)
+      : undefined
+    const body = claudeRequestBody(options, messages, maxTokens, thinking, effort)
+    return proxiedFetch(CLAUDE_API_URL, {
       method: 'POST',
       headers: {
         'authorization': `Bearer ${session.accessToken}`,

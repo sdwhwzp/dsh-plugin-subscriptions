@@ -1,6 +1,6 @@
 /**
- * The `/api/subscriptions-auth/*` host RPC endpoints the web Settings page drives. The
- * endpoints are registered only when a host `connection` service exists (the web
+ * The `/subscriptions-auth` host RPC channel the web Settings page drives. The
+ * channel is registered only when a host `connection` service exists (the web
  * profile); headless compositions load the plugin without it. All business
  * outcomes are returned as RpcResult values; handlers never throw.
  */
@@ -13,6 +13,7 @@ import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { AuthenticatedPrincipal } from '@deepseek-ai/dsh-llm'
 import { PROVIDER_IDS, type ProviderId } from './store.js'
 import type { ProviderUsage } from '../providers/common.js'
+import type { ProxyConfigView, ProxyDraft, ProxyInput, ProxyTestResult } from '../http.js'
 
 /** Shared authenticated RPC channel used by the web client. */
 export const SUBSCRIPTIONS_AUTH_CHANNEL = '/api'
@@ -57,18 +58,69 @@ export interface SpeedController {
   setSpeed(sessionId: string, tier: SpeedTier): Promise<void>
 }
 
-/** Login state of one provider, as rendered by the Settings page. */
-export interface ProviderStatus {
-  /** Whether a session exists in the store. */
-  loggedIn: boolean
-  /** Whether a login attempt is currently waiting for its code. */
-  busy: boolean
+/** One logged-in account, as rendered by the Settings page. */
+export interface AccountStatus {
+  /** Stable account key (store identity). */
+  key: string
+  /** Display identity (email / login), when known. */
+  account?: string
   /** Epoch milliseconds at which the stored access token expires. */
   expiresAt?: number
-  /** Account email or account id, when known. */
-  account?: string
-  /** Subscription detail (plan) or the last login error. */
+  /** Plan name the session carries (codex planType / claude subscriptionType), when known. */
+  plan?: string
+  /** Whether direct (non-pool) routes serve this account. */
+  isDefault: boolean
+}
+
+/** Login state of one provider, as rendered by the Settings page. */
+export interface ProviderStatus {
+  /** Whether a login attempt is currently waiting for its code. */
+  busy: boolean
+  /** Logged-in accounts, default first. */
+  accounts: AccountStatus[]
+  /** The last login error, shown until the next success. */
   detail?: string
+}
+
+/** How a Claude login should acquire credentials (other providers ignore it). */
+export type LoginMethod = 'oauth' | 'keychain'
+
+/** Proxy config operations behind the `proxyGet/proxySet/proxyTest` endpoints. */
+export interface ProxyConfigController {
+  /** Current proxy configuration (secrets omitted). */
+  get(): Promise<ProxyConfigView>
+  /** Validate, persist, and apply one config. */
+  set(input: ProxyInput): Promise<ProxyConfigView>
+  /** Probe one destination through the draft (unsaved) or stored proxy. */
+  test(payload: { url?: string; proxy?: ProxyDraft }): Promise<ProxyTestResult>
+}
+
+/** One model's default-effort picker state, as rendered by the Settings page. */
+export interface ModelDefaultView {
+  /** Wire model id. */
+  id: string
+  /** Human-readable display name. */
+  name: string
+  /** Advertised effort levels, in catalog order (empty when the model has no reasoning). */
+  efforts: { id: string; name: string }[]
+  /** The user-configured default effort, when set. */
+  configured?: string
+}
+
+/** One provider's default-effort picker state. */
+export interface ModelDefaultsCatalog {
+  /** The subscription provider route. */
+  provider: ProviderId
+  /** Models the picker can configure, in catalog order. */
+  models: ModelDefaultView[]
+}
+
+/** Default-effort picker operations behind the `modelDefaults/setModelDefault` endpoints. */
+export interface ModelDefaultsController {
+  /** Per-provider picker state for the Settings page. */
+  catalog(): Promise<ModelDefaultsCatalog[]>
+  /** Set one model's configured default effort; undefined clears the override. */
+  set(provider: ProviderId, model: string, effort: string | undefined): Promise<void>
 }
 
 /** Provider-agnostic auth operations the RPC handler delegates to. */
@@ -77,10 +129,15 @@ export interface AuthController {
   status(provider: ProviderId): Promise<ProviderStatus>
   /**
    * Start a background login attempt.
-   * @returns the authorize URL for the user's browser.
+   * @param provider - the provider route.
+   * @param method - Claude only: force the OAuth browser flow or the Claude
+   *   Code credential import; omitted keeps the auto behavior (import when
+   *   available, else OAuth).
+   * @returns the authorize URL for the user's browser; device-flow providers
+   *   (copilot) also return the `userCode` the user types at that URL.
    * @throws when an attempt is already running for this provider.
    */
-  login(provider: ProviderId): Promise<{ authorizeUrl: string }>
+  login(provider: ProviderId, method?: LoginMethod): Promise<{ authorizeUrl: string; userCode?: string }>
   /**
    * Feed a pasted callback URL or bare code into the pending attempt.
    * @throws when no attempt is pending or the input is unusable.
@@ -88,15 +145,19 @@ export interface AuthController {
   manual(provider: ProviderId, input: string): Promise<void>
   /** Abort the pending attempt; a no-op when none is pending. */
   cancel(provider: ProviderId): Promise<void>
-  /** Delete the stored session. */
-  logout(provider: ProviderId): Promise<void>
+  /** Delete one account's stored session. */
+  logout(provider: ProviderId, account: string): Promise<void>
+  /** Pin the account direct (non-pool) routes serve. */
+  setDefault(provider: ProviderId, account: string): Promise<void>
   /**
-   * Current subscription usage of one provider.
+   * Current subscription usage of one account.
    * @param signal - caller cancellation from the RPC transport.
+   * @param force - bypass a fresh cached snapshot for an honest re-check
+   *   (the manual Refresh button); a live failure cooldown still applies.
    * @returns `{ supported: false }` when the provider has no usage endpoint.
    * @throws when logged out or the usage lookup fails.
    */
-  usage(provider: ProviderId, signal: AbortSignal): Promise<ProviderUsage>
+  usage(provider: ProviderId, account: string, signal: AbortSignal, force?: boolean): Promise<ProviderUsage>
   /**
    * Read one image attachment's bytes for inline display.
    * @param ref - the full durable reference (`readImage` verifies against it).
@@ -117,7 +178,7 @@ export interface AuthController {
 }
 
 /** Payload carried no usable provider id — an RPC client bug, not a server failure. */
-class BadRequest extends Error {}
+export class BadRequest extends Error {}
 
 /** A subaccount may use assigned models but cannot inspect or mutate the owner's subscription. */
 class AdminForbidden extends Error {}
@@ -132,6 +193,9 @@ function failure(error: unknown): RpcResult<unknown> {
     // The issues array is zod-shaped upstream; this channel validates by hand.
     return { ok: false, error: { code: 'bad-request', message, details: { issues: [] } } }
   }
+  if (error instanceof AdminForbidden) {
+    return { ok: false, error: { code: 'bad-request', message: `forbidden: ${message}`, details: { issues: [] } } }
+  }
   return { ok: false, error: { code: 'internal', message, details: {} } }
 }
 
@@ -140,9 +204,15 @@ function canViewUsage(principal: AuthenticatedPrincipal | undefined): boolean {
   return principal?.role !== 'user'
 }
 
-/** Whether this verified caller may change provider login credentials. */
+/** Whether this verified caller may change global subscription configuration. */
 function canManageCredentials(principal: AuthenticatedPrincipal | undefined): boolean {
   return principal?.role !== 'user'
+}
+
+/** Remove provider-account metadata from the status returned to a subaccount. */
+function statusForCaller(status: ProviderStatus, principal: AuthenticatedPrincipal | undefined): ProviderStatus {
+  if (canManageCredentials(principal)) return status
+  return { busy: status.busy, accounts: [] }
 }
 
 /** Reject direct usage RPC calls from a verified subaccount. */
@@ -150,10 +220,10 @@ function assertCanViewUsage(principal: AuthenticatedPrincipal | undefined): void
   if (!canViewUsage(principal)) throw new AdminForbidden('subscription usage is available only to administrators')
 }
 
-/** Reject provider credential mutations from a verified subaccount. */
+/** Reject global subscription configuration calls from a verified subaccount. */
 function assertCanManageCredentials(principal: AuthenticatedPrincipal | undefined): void {
   if (!canManageCredentials(principal)) {
-    throw new AdminForbidden('subscription login is available only to administrators')
+    throw new AdminForbidden('subscription credentials are available only to administrators')
   }
 }
 
@@ -172,6 +242,36 @@ function readString(payload: unknown, field: string): string {
     throw new BadRequest(`payload.${field} must be a non-empty string`)
   }
   return value
+}
+
+/** Validate the `setModelDefault` endpoint's payload. */
+function readModelDefaultInput(payload: unknown): { provider: ProviderId; model: string; effort?: string } {
+  const provider = readProvider(payload)
+  const model = readString(payload, 'model')
+  const record = payload as Record<string, unknown>
+  let effort: string | undefined
+  if (record.effort !== undefined) {
+    if (typeof record.effort !== 'string' || record.effort.length === 0) {
+      throw new BadRequest('payload.effort must be a non-empty string when present')
+    }
+    effort = record.effort
+  }
+  return {
+    provider,
+    model,
+    ...(effort === undefined ? {} : { effort }),
+  }
+}
+
+/** Validate the optional Claude login method. */
+function readLoginMethod(payload: unknown, provider: ProviderId): LoginMethod | undefined {
+  const method = (payload as Record<string, unknown>).method
+  if (method === undefined) return undefined
+  if (provider !== 'claude') throw new BadRequest('payload.method is only valid for claude')
+  if (method !== 'oauth' && method !== 'keychain') {
+    throw new BadRequest('payload.method must be "oauth" or "keychain"')
+  }
+  return method
 }
 
 /** Validate the `setSpeed` endpoint's tier. */
@@ -229,15 +329,104 @@ function readVideoName(payload: unknown): string {
   return name
 }
 
+/** Validate the `usage` endpoint's optional force flag. */
+function readForce(payload: unknown): boolean {
+  if (typeof payload !== 'object' || payload === null) return false
+  const force = (payload as Record<string, unknown>).force
+  if (force === undefined) return false
+  if (typeof force !== 'boolean') throw new BadRequest('payload.force must be a boolean when present')
+  return force
+}
+
 /** Validate the session id both speed endpoints carry. */
 function readSessionId(payload: unknown): string {
   if (typeof payload !== 'object' || payload === null) throw new BadRequest('payload must be an object')
   return readString(payload, 'sessionId')
 }
 
+/** Validate a `proxySet` payload into a shape `ProxyInput` accepts. */
+function readProxyInput(payload: unknown): ProxyInput {
+  if (typeof payload !== 'object' || payload === null) throw new BadRequest('payload must be an object')
+  const record = payload as Record<string, unknown>
+  if (typeof record.enabled !== 'boolean') throw new BadRequest('payload.enabled must be a boolean')
+  if (typeof record.url !== 'string') throw new BadRequest('payload.url must be a string')
+  let username: string | undefined
+  if (record.username !== undefined) {
+    if (typeof record.username !== 'string') throw new BadRequest('payload.username must be a string when present')
+    username = record.username
+  }
+  let password: string | null | undefined
+  if (record.password !== undefined) {
+    if (record.password !== null && typeof record.password !== 'string') {
+      throw new BadRequest('payload.password must be a string or null when present')
+    }
+    password = record.password
+  }
+  let bypass: string[] | undefined
+  if (record.bypass !== undefined) {
+    if (!Array.isArray(record.bypass) || record.bypass.some(entry => typeof entry !== 'string')) {
+      throw new BadRequest('payload.bypass must be an array of strings when present')
+    }
+    bypass = record.bypass
+  }
+  return {
+    enabled: record.enabled,
+    url: record.url,
+    ...username === undefined ? {} : { username },
+    ...password === undefined ? {} : { password },
+    ...bypass === undefined ? {} : { bypass },
+  }
+}
+
+/** Validate a `proxyTest` payload (the destination URL and an optional draft). */
+function readProxyTestPayload(payload: unknown): { url?: string; proxy?: ProxyDraft } {
+  if (typeof payload !== 'object' || payload === null) return {}
+  const record = payload as Record<string, unknown>
+  const url = record.url
+  if (url === undefined && record.proxy === undefined) return {}
+  if (url !== undefined && (typeof url !== 'string' || url.length === 0)) {
+    throw new BadRequest('payload.url must be a non-empty string when present')
+  }
+  let proxy: ProxyDraft | undefined
+  if (record.proxy !== undefined) {
+    if (typeof record.proxy !== 'object' || record.proxy === null) {
+      throw new BadRequest('payload.proxy must be an object when present')
+    }
+    const draftRecord = record.proxy as Record<string, unknown>
+    if (typeof draftRecord.url !== 'string' || draftRecord.url.length === 0) {
+      throw new BadRequest('payload.proxy.url must be a non-empty string')
+    }
+    let username: string | undefined
+    if (draftRecord.username !== undefined) {
+      if (typeof draftRecord.username !== 'string') {
+        throw new BadRequest('payload.proxy.username must be a string when present')
+      }
+      username = draftRecord.username
+    }
+    let password: string | undefined
+    if (draftRecord.password !== undefined) {
+      if (typeof draftRecord.password !== 'string') {
+        throw new BadRequest('payload.proxy.password must be a string when present')
+      }
+      password = draftRecord.password
+    }
+    proxy = {
+      url: draftRecord.url,
+      ...username === undefined ? {} : { username },
+      ...password === undefined ? {} : { password },
+    }
+  }
+  return {
+    ...url === undefined ? {} : { url },
+    ...proxy === undefined ? {} : { proxy },
+  }
+}
+
 async function dispatch(
   controller: AuthController,
   speed: SpeedController,
+  proxy: ProxyConfigController | undefined,
+  modelDefaults: ModelDefaultsController | undefined,
   endpoint: string,
   payload: unknown,
   signal: AbortSignal,
@@ -246,7 +435,7 @@ async function dispatch(
   switch (endpoint) {
     case 'status': {
       const entries = await Promise.all(PROVIDER_IDS.map(
-        async provider => [provider, await controller.status(provider)] as const,
+        async provider => [provider, statusForCaller(await controller.status(provider), principal)] as const,
       ))
       return ok({
         providers: Object.fromEntries(entries),
@@ -254,9 +443,11 @@ async function dispatch(
         canManageCredentials: canManageCredentials(principal),
       })
     }
-    case 'login':
+    case 'login': {
       assertCanManageCredentials(principal)
-      return ok(await controller.login(readProvider(payload)))
+      const provider = readProvider(payload)
+      return ok(await controller.login(provider, readLoginMethod(payload, provider)))
+    }
     case 'manual': {
       assertCanManageCredentials(principal)
       const provider = readProvider(payload)
@@ -267,13 +458,23 @@ async function dispatch(
       assertCanManageCredentials(principal)
       await controller.cancel(readProvider(payload))
       return ok({ ok: true })
-    case 'logout':
+    case 'logout': {
       assertCanManageCredentials(principal)
-      await controller.logout(readProvider(payload))
+      const provider = readProvider(payload)
+      await controller.logout(provider, readString(payload, 'account'))
       return ok({ ok: true })
-    case 'usage':
+    }
+    case 'setDefault': {
+      assertCanManageCredentials(principal)
+      const provider = readProvider(payload)
+      await controller.setDefault(provider, readString(payload, 'account'))
+      return ok({ ok: true })
+    }
+    case 'usage': {
       assertCanViewUsage(principal)
-      return ok(await controller.usage(readProvider(payload), signal))
+      const provider = readProvider(payload)
+      return ok(await controller.usage(provider, readString(payload, 'account'), signal, readForce(payload)))
+    }
     case 'image':
       return ok(await controller.readImage(readImageRef(payload), signal))
     case 'video':
@@ -283,18 +484,50 @@ async function dispatch(
     case 'setSpeed':
       await speed.setSpeed(readSessionId(payload), readSpeedTier(payload))
       return ok({ ok: true })
+    case 'proxyGet':
+      assertCanManageCredentials(principal)
+      if (proxy === undefined) throw new BadRequest('proxy configuration is unavailable')
+      return ok(await proxy.get())
+    case 'proxySet':
+      assertCanManageCredentials(principal)
+      if (proxy === undefined) throw new BadRequest('proxy configuration is unavailable')
+      return ok(await proxy.set(readProxyInput(payload)))
+    case 'proxyTest':
+      assertCanManageCredentials(principal)
+      if (proxy === undefined) throw new BadRequest('proxy configuration is unavailable')
+      return ok(await proxy.test(readProxyTestPayload(payload)))
+    case 'modelDefaults':
+      assertCanManageCredentials(principal)
+      if (modelDefaults === undefined) throw new BadRequest('model defaults are unavailable')
+      return ok(await modelDefaults.catalog())
+    case 'setModelDefault':
+      assertCanManageCredentials(principal)
+      if (modelDefaults === undefined) throw new BadRequest('model defaults are unavailable')
+      {
+        const input = readModelDefaultInput(payload)
+        await modelDefaults.set(input.provider, input.model, input.effort)
+      }
+      return ok({ ok: true })
     default:
       throw new BadRequest(`unknown /api/${SUBSCRIPTIONS_AUTH_PREFIX}${endpoint} endpoint`)
   }
 }
 
 /**
- * Register the `/api/subscriptions-auth/*` RPC endpoints when a host connection exists.
+ * Register the `/subscriptions-auth` RPC channel when a host connection exists.
  * @param ctx - the plugin context (headless profiles have no `connection`).
  * @param controller - the auth operations backing the endpoints.
  * @param speed - the per-session speed-tier state backing the Speed toggle.
+ * @param proxy - optional proxy-config controller backing `proxyGet`/`proxySet`/`proxyTest`.
+ * @param modelDefaults - optional per-model default-effort state backing `modelDefaults`/`setModelDefault`.
  */
-export function registerAuthRpc(ctx: Context, controller: AuthController, speed: SpeedController): void {
+export function registerAuthRpc(
+  ctx: Context,
+  controller: AuthController,
+  speed: SpeedController,
+  proxy: ProxyConfigController | undefined = undefined,
+  modelDefaults: ModelDefaultsController | undefined = undefined,
+): void {
   // `connection` is not in this plugin's inject list (headless compositions
   // lack it), so its startup order is unconstrained: defer registration until
   // the service exists instead of probing once at apply time.
@@ -310,6 +543,8 @@ export function registerAuthRpc(ctx: Context, controller: AuthController, speed:
             return await dispatch(
               controller,
               speed,
+              proxy,
+              modelDefaults,
               endpoint.slice(SUBSCRIPTIONS_AUTH_PREFIX.length),
               payload,
               signal,

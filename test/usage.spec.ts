@@ -1,6 +1,6 @@
 /**
  * Subscription usage lookups: fetchCodexUsage / fetchClaudeUsage payload
- * mapping (via an injected fetch, no network) and the `/api/subscriptions-auth/*`
+ * mapping (via an injected fetch, no network) and the `/subscriptions-auth`
  * `usage` endpoint answering `{ supported: false }` for providers without a
  * usage fetcher and an error result for a logged-out provider.
  */
@@ -20,8 +20,13 @@ const { fetchCodexUsage } = await import('../src/providers/codex.js')
 const { fetchClaudeUsage } = await import('../src/providers/claude.js')
 const { fetchGrokUsage, grokTierName } = await import('../src/providers/grok.js')
 const plugin = await import('../src/index.js')
+const { SubscriptionsAuthController } = plugin
+const { OAuthFlowManager } = await import('../src/auth/oauth-flow.js')
+const { DeviceFlowManager } = await import('../src/auth/device-flow.js')
+const { PoolUsageTracker } = await import('../src/providers/pool-usage.js')
 
-import type { FetchFn } from '../src/providers/common.js'
+import { OAuthEndpointError } from '../src/providers/common.js'
+import type { FetchFn, ProviderUsage } from '../src/providers/common.js'
 import type { ClaudeSession, CodexSession, GrokSession } from '../src/auth/store.js'
 
 const codexSession: CodexSession = {
@@ -162,6 +167,18 @@ test('fetchClaudeUsage maps legacy buckets and skips null ones', async () => {
   assert.equal(requests[0].headers.authorization, 'Bearer at')
 })
 
+test('fetchClaudeUsage: a 429 carries the retry-after header as retryAfterMs (issue #46)', async () => {
+  const fetchFn: FetchFn = ((_url: string | URL | Request, _init?: RequestInit) => Promise.resolve(
+    new Response(JSON.stringify({}), { status: 429, headers: { 'retry-after': '462' } }),
+  )) as FetchFn
+  await assert.rejects(fetchClaudeUsage(claudeSession, fetchFn), (error: unknown) => {
+    assert.ok(error instanceof OAuthEndpointError)
+    assert.equal(error.status, 429)
+    assert.equal(error.retryAfterMs, 462_000)
+    return true
+  })
+})
+
 test('fetchClaudeUsage prefers the modern limits array when present', async () => {
   const { fetchFn } = fakeFetch({
     five_hour: null,
@@ -266,7 +283,7 @@ async function mount(): Promise<ConnectionRpcHandler> {
   ctx.provide('llm', { registerAdapter: () => Object.assign(() => {}, { replace: () => {} }) })
   ctx.provide('connection', {
     rpc: {
-      intercept: (_channel: string, _matches: (endpoint: string) => boolean, h: ConnectionRpcHandler) => {
+      handle: (_channel: string, h: ConnectionRpcHandler) => {
         handler = h
         return () => Promise.resolve()
       },
@@ -274,20 +291,20 @@ async function mount(): Promise<ConnectionRpcHandler> {
   })
   ctx.plugin(plugin, { providers: ['codex'] })
   await new Promise(resolve => setTimeout(resolve, 50))
-  assert.ok(handler !== undefined, 'the /api/subscriptions-auth/* endpoints were registered')
+  assert.ok(handler !== undefined, 'the /subscriptions-auth channel was registered')
   return handler
 }
 
 test('usage endpoint: provider without a usage fetcher answers supported:false', async () => {
   const handler = await mount()
   // Only codex is registered, so grok never got a usage fetcher.
-  const result = await handler('subscriptions-auth/usage', { provider: 'grok' }, new AbortController().signal, undefined)
+  const result = await handler('usage', { provider: 'grok', account: 'a1' }, new AbortController().signal)
   assert.deepEqual(result, { ok: true, value: { supported: false } })
 })
 
 test('usage endpoint: logged-out provider answers an error result', async () => {
   const handler = await mount()
-  const result = await handler('subscriptions-auth/usage', { provider: 'codex' }, new AbortController().signal, undefined)
+  const result = await handler('usage', { provider: 'codex', account: 'a1' }, new AbortController().signal)
   assert.equal(result.ok, false)
   if (!result.ok) {
     assert.equal(result.error.code, 'internal')
@@ -295,42 +312,73 @@ test('usage endpoint: logged-out provider answers an error result', async () => 
   }
 })
 
-test('usage endpoint: subaccounts cannot inspect provider quota', async () => {
-  const handler = await mount()
-  const signal = new AbortController().signal
-  const child = { source: 'dsh-passwords', id: '2', username: 'child', role: 'user' } as const
-  const status = await handler('subscriptions-auth/status', {}, signal, child)
-  assert.equal(status.ok, true)
-  if (status.ok) {
-    const permissions = status.value as { canViewUsage: boolean; canManageCredentials: boolean }
-    assert.equal(permissions.canViewUsage, false)
-    assert.equal(permissions.canManageCredentials, false)
-  }
-
-  const result = await handler('subscriptions-auth/usage', { provider: 'codex' }, signal, child)
-  assert.equal(result.ok, false)
-  if (!result.ok) assert.match(result.error.message, /only to administrators/)
-})
-
-test('usage endpoint: administrators retain provider quota access', async () => {
-  const handler = await mount()
-  const signal = new AbortController().signal
-  const admin = { source: 'dsh-passwords', id: '1', username: 'owner', role: 'admin' } as const
-  const status = await handler('subscriptions-auth/status', {}, signal, admin)
-  assert.equal(status.ok, true)
-  if (status.ok) {
-    const permissions = status.value as { canViewUsage: boolean; canManageCredentials: boolean }
-    assert.equal(permissions.canViewUsage, true)
-    assert.equal(permissions.canManageCredentials, true)
-  }
-
-  const result = await handler('subscriptions-auth/usage', { provider: 'grok' }, signal, admin)
-  assert.deepEqual(result, { ok: true, value: { supported: false } })
-})
-
 test('usage endpoint: payload validation rejects unknown providers', async () => {
   const handler = await mount()
-  const result = await handler('subscriptions-auth/usage', { provider: 'gemini' }, new AbortController().signal, undefined)
+  const result = await handler('usage', { provider: 'gemini' }, new AbortController().signal)
   assert.equal(result.ok, false)
   if (!result.ok) assert.equal(result.error.code, 'bad-request')
+})
+
+test('usage endpoint: payload validation rejects a non-boolean force flag', async () => {
+  const handler = await mount()
+  const result = await handler('usage', { provider: 'codex', account: 'a1', force: 'yes' }, new AbortController().signal)
+  assert.equal(result.ok, false)
+  if (!result.ok) assert.equal(result.error.code, 'bad-request')
+})
+
+// ---------------------------------------------------------------------------
+// SubscriptionsAuthController.usage(): delegation to the pool's usage cache.
+// The RPC and mount() tests above only exercise the "no pool tracker yet"
+// (logged-out) path; these construct the controller directly, the way
+// login.spec.ts does, to prove the actual wiring fixed by issue #46 — a
+// failing usage fetch must not be retried through an active cooldown, and a
+// manual (forced) refresh must bypass a fresh cache without bypassing that
+// cooldown.
+// ---------------------------------------------------------------------------
+
+/** A usage fetcher the delegation tests assert is never reached once a pool tracker is wired in. */
+function unreachableFetcher(): Promise<ProviderUsage> {
+  throw new Error('the raw fetcher must not be called once the pool usage cache is wired in')
+}
+
+test('usage(): delegates to the pool usage cache, which withholds retries through a 429 cooldown', async () => {
+  let calls = 0
+  const error = new OAuthEndpointError('claude usage token endpoint error (HTTP 429)', 429, undefined, 60_000)
+  const poolUsage = new PoolUsageTracker((provider, account) =>
+    provider === 'codex' && account === 'a1' ? () => { calls += 1; return Promise.reject(error) } : undefined)
+  const controller = new SubscriptionsAuthController(
+    new OAuthFlowManager(), new DeviceFlowManager(), () => {}, () => undefined,
+    { codex: unreachableFetcher }, undefined, poolUsage,
+  )
+  await assert.rejects(controller.usage('codex', 'a1', new AbortController().signal), error)
+  assert.equal(calls, 1)
+  await assert.rejects(controller.usage('codex', 'a1', new AbortController().signal), error)
+  assert.equal(calls, 1, 'a second call inside the retry-after window must not hit the network again')
+})
+
+test('usage(): a manual (forced) refresh bypasses a fresh cached snapshot, not a live cooldown', async () => {
+  let calls = 0
+  const usage: ProviderUsage = { supported: true, windows: [] }
+  const poolUsage = new PoolUsageTracker((provider, account) =>
+    provider === 'codex' && account === 'a1' ? () => { calls += 1; return Promise.resolve(usage) } : undefined)
+  const controller = new SubscriptionsAuthController(
+    new OAuthFlowManager(), new DeviceFlowManager(), () => {}, () => undefined,
+    { codex: unreachableFetcher }, undefined, poolUsage,
+  )
+  await controller.usage('codex', 'a1', new AbortController().signal)
+  await controller.usage('codex', 'a1', new AbortController().signal)
+  assert.equal(calls, 1, 'a plain call reuses the fresh cache')
+  await controller.usage('codex', 'a1', new AbortController().signal, true)
+  assert.equal(calls, 2, 'a forced call re-checks despite the fresh cache')
+})
+
+test('usage(): with no pool tracker (pool disabled), every call hits the raw fetcher directly', async () => {
+  let calls = 0
+  const controller = new SubscriptionsAuthController(
+    new OAuthFlowManager(), new DeviceFlowManager(), () => {}, () => undefined,
+    { codex: async () => { calls += 1; return { supported: true, windows: [] } } },
+  )
+  await controller.usage('codex', 'a1', new AbortController().signal)
+  await controller.usage('codex', 'a1', new AbortController().signal)
+  assert.equal(calls, 2, 'unchanged prior behavior when the pool usage cache is unavailable')
 })

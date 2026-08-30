@@ -4,7 +4,7 @@
  * endpoint.
  */
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { attributionHeaders, EMPTY_RESPONSE_CODE, errorChain, LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
@@ -16,19 +16,27 @@ import type {
 import { decodeJwtPayload } from '../auth/jwt.js'
 import type { FlowSpec } from '../auth/oauth-flow.js'
 import type { CodexSession } from '../auth/store.js'
+import type { ProviderId } from '../auth/store.js'
+import type { PoolAdapter } from './pool.js'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { resolveImages } from '../translate/resolved.js'
 import { streamResponses, toResponsesInput, toResponsesTools } from '../translate/responses.js'
 import type { ResponsesRequestInput } from '../translate/responses.js'
 import {
+  effortDisplayName,
   httpLlmError,
   idleWatchdog,
   mapFetchFailure,
+  mergeReasoning,
   ModelCatalogCache,
+  discoverAcrossAccounts,
+  discoverOrRetryAuth,
+  isDiscoveryAborted,
+  isMissingOrInvalidCredential,
   oauthEndpointError,
   OAuthEndpointError,
-  TokenManager,
 } from './common.js'
+import { AccountTokenManager, DISCOVERY_TIMEOUT_MS, unionAccountCatalogs } from './accounts.js'
 import type {
   CatalogPersistence,
   DiscoveredModel,
@@ -37,6 +45,7 @@ import type {
   ProviderUsage,
   UsageWindow,
 } from './common.js'
+import { proxiedFetch } from '../http.js'
 
 export const CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann'
 export const CODEX_AUTHORIZE_URL = 'https://auth.openai.com/oauth/authorize'
@@ -49,7 +58,7 @@ const CODEX_DEFAULT_MAX_TOKENS = 128_000
 /** Refresh when the access token has less than this much life left. */
 export const CODEX_PREEMPT_MS = 5 * 60_000
 
-/** ChatGPT subscription models exposed in the picker and built-in fallback. */
+/** ChatGPT subscription models exposed to customer accounts. */
 export const CODEX_PICKER_MODELS: readonly ModelEntry[] = [
   { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol' },
   { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra' },
@@ -57,7 +66,7 @@ export const CODEX_PICKER_MODELS: readonly ModelEntry[] = [
 ]
 const CODEX_PICKER_MODEL_IDS = new Set(CODEX_PICKER_MODELS.map(model => model.id))
 
-/** Keep only the current ChatGPT subscription models, including for persisted catalogs. */
+/** Keep only the current ChatGPT subscription models in every catalog source. */
 function pickerModels<Model extends { id: string }>(models: readonly Model[]): Model[] {
   return models.filter(model => CODEX_PICKER_MODEL_IDS.has(model.id))
 }
@@ -215,7 +224,7 @@ function codexSession(tokens: CodexTokenResponse, fallback?: CodexSession): Code
  * @returns the session to store.
  */
 export async function exchangeCodexCode(code: string, verifier: string, redirectUri: string): Promise<CodexSession> {
-  const response = await fetch(CODEX_TOKEN_URL, {
+  const response = await proxiedFetch(CODEX_TOKEN_URL, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -236,7 +245,7 @@ export async function exchangeCodexCode(code: string, verifier: string, redirect
  * @returns the fresh session to store.
  */
 export async function refreshCodex(session: CodexSession): Promise<CodexSession> {
-  const response = await fetch(CODEX_TOKEN_URL, {
+  const response = await proxiedFetch(CODEX_TOKEN_URL, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -329,7 +338,7 @@ function codexUsageWindow(value: unknown, fallbackKind: UsageWindow['kind']): Us
  */
 export async function fetchCodexUsage(
   session: CodexSession,
-  fetchFn: FetchFn = fetch,
+  fetchFn: FetchFn = proxiedFetch,
   signal?: AbortSignal,
 ): Promise<ProviderUsage> {
   const response = await fetchFn(CODEX_USAGE_URL, {
@@ -385,11 +394,6 @@ interface CodexWireModel {
   priority?: number
 }
 
-/** Display name for a wire reasoning-effort value. */
-function effortName(effort: string): string {
-  return effort === 'xhigh' ? 'Extra High' : effort.charAt(0).toUpperCase() + effort.slice(1)
-}
-
 /**
  * Whether a catalog entry advertises the fast tier. Mirrors codex-rs
  * `ModelPreset::supports_fast_mode`: a `service_tiers` id matching the fast
@@ -404,9 +408,14 @@ function supportsFastTier(entry: CodexWireModel): boolean {
  * Fetch the live codex model catalog with the session's auth headers.
  * @param session - the stored session (used as-is; never refreshed here).
  * @param fetchFn - fetch implementation (injectable for tests).
+ * @param signal - caller cancellation (pool-assembly timeout).
  * @returns current picker models: old and hidden entries dropped, sorted by priority.
  */
-export async function fetchCodexModels(session: CodexSession, fetchFn: FetchFn = fetch): Promise<DiscoveredModel[]> {
+export async function fetchCodexModels(
+  session: CodexSession,
+  fetchFn: FetchFn = proxiedFetch,
+  signal?: AbortSignal,
+): Promise<DiscoveredModel[]> {
   const url = `${CODEX_MODELS_URL}?client_version=${CODEX_CLIENT_VERSION}`
   const response = await fetchFn(url, {
     headers: {
@@ -416,6 +425,7 @@ export async function fetchCodexModels(session: CodexSession, fetchFn: FetchFn =
       'accept': 'application/json',
       ...attributionHeaders(),
     },
+    ...signal === undefined ? {} : { signal },
   })
   if (!response.ok) throw await oauthEndpointError(response, 'codex models')
   const payload = await response.json() as { models?: CodexWireModel[] }
@@ -431,7 +441,7 @@ export async function fetchCodexModels(session: CodexSession, fetchFn: FetchFn =
       .filter(level => typeof level.effort === 'string' && level.effort.length > 0)
       .map(level => ({
         id: ReasoningEffortId(level.effort as string),
-        name: effortName(level.effort as string),
+        name: effortDisplayName(level.effort as string),
         ...level.description === undefined ? {} : { description: level.description },
       }))
     const defaultEffort = typeof entry.default_reasoning_level === 'string'
@@ -459,10 +469,11 @@ export async function fetchCodexModels(session: CodexSession, fetchFn: FetchFn =
     discovered.push(model)
   }
   discovered.sort((a, b) => (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER))
-  // No supported entries means the backend gated this client or has not
-  // advertised the current set. Fall back instead of hiding the provider.
+  // An empty catalog from a 200 response means the backend gated us out (e.g.
+  // client_version too old): surface it as a discovery failure so the adapter
+  // falls back to the static catalog instead of vanishing from the picker.
   if (discovered.length === 0) {
-    throw new Error(`codex models endpoint returned no picker-visible GPT-5.6 models (client_version ${CODEX_CLIENT_VERSION})`)
+    throw new Error(`codex models endpoint returned an empty catalog (client_version ${CODEX_CLIENT_VERSION})`)
   }
   return discovered
 }
@@ -471,7 +482,9 @@ export async function fetchCodexModels(session: CodexSession, fetchFn: FetchFn =
 export interface CodexAdapterOptions {
   models: readonly ModelEntry[]
   streamIdleTimeoutMs: number
-  tokens: TokenManager<CodexSession>
+  tokens: AccountTokenManager<CodexSession>
+  /** Late-bound pool facade (wired after adapter construction); pools list under their first member's provider. */
+  pool?: () => PoolAdapter | undefined
   /** Whether to fetch the live catalog when logged in (false when config `models` overrides). */
   discovery: boolean
   /** Warning sink for discovery failures that fall back to the static catalog. */
@@ -482,12 +495,70 @@ export interface CodexAdapterOptions {
   resolveAttachments?: () => AttachmentStore | undefined
   /** Durable catalog store seeding capability metadata across restarts. */
   catalogStore?: CatalogPersistence
+  /** Per-account catalog bound for the picker union (defaults to {@link DISCOVERY_TIMEOUT_MS}). */
+  discoveryTimeoutMs?: number
+  /**
+   * Per-model default reasoning effort override (the Settings page's picker).
+   * Returns the user-configured default for one model, or undefined to follow
+   * the provider's own default.
+   */
+  defaultEffortOf?: (model: string) => string | undefined
   /**
    * Per-request speed lookup (the composer Speed toggle's host half). Returns
    * whether this session's current choice sends the model on the fast tier;
    * absent means every request stays on standard routing.
    */
   speedFor?: (sessionId: string | undefined, model: string) => Promise<boolean> | boolean
+}
+
+const CODEX_CALL_ID_MAX_LENGTH = 64
+const CODEX_CALL_ID_PREFIX = 'call_'
+
+/**
+ * Bound tool-call ids at the Codex wire boundary without changing the shared
+ * Responses translation used by Grok. Short ids stay verbatim. Oversized ids
+ * become deterministic hashes, and every id already present in this request
+ * is reserved first so a generated id cannot collide with a legitimate short
+ * one (or another oversized id).
+ */
+function normalizeCodexCallIds(input: ResponsesRequestInput['input']): ResponsesRequestInput['input'] {
+  const mapping = new Map<string, string>()
+  const used = new Set<string>()
+  const callId = (item: Record<string, unknown>): string | undefined =>
+    (item.type === 'function_call' || item.type === 'function_call_output') && typeof item.call_id === 'string'
+      ? item.call_id
+      : undefined
+
+  for (const item of input) {
+    const id = callId(item)
+    if (id !== undefined && id.length <= CODEX_CALL_ID_MAX_LENGTH) {
+      mapping.set(id, id)
+      used.add(id)
+    }
+  }
+
+  for (const item of input) {
+    const id = callId(item)
+    if (id === undefined || mapping.has(id)) continue
+    let attempt = 0
+    let normalized: string
+    do {
+      const hash = createHash('sha256')
+      if (attempt > 0) hash.update(String(attempt)).update('\0')
+      const digest = hash.update(id).digest('hex')
+      normalized = `${CODEX_CALL_ID_PREFIX}${digest.slice(0, CODEX_CALL_ID_MAX_LENGTH - CODEX_CALL_ID_PREFIX.length)}`
+      attempt += 1
+    } while (used.has(normalized))
+    mapping.set(id, normalized)
+    used.add(normalized)
+  }
+
+  return input.map((item) => {
+    const id = callId(item)
+    if (id === undefined) return item
+    const normalized = mapping.get(id) ?? id
+    return normalized === id ? item : { ...item, call_id: normalized }
+  })
 }
 
 /**
@@ -504,7 +575,7 @@ export function codexRequestBody(
   return {
     model: options.model,
     instructions: resolved.instructions ?? DEFAULT_CODEX_INSTRUCTIONS,
-    input: resolved.input,
+    input: normalizeCodexCallIds(resolved.input),
     ...options.tools !== undefined && options.tools.length > 0
       ? { tools: toResponsesTools(options.tools) }
       : {},
@@ -524,6 +595,10 @@ export function codexRequestBody(
 /** Codex wire adapter: one instance serves the `codex` provider route. */
 export class CodexAdapter extends LlmAdapter {
   private readonly catalog: ModelCatalogCache
+  /** In-memory catalogs for non-default accounts (the persisted cache is the default's). */
+  private readonly accountCatalogs = new Map<string, ModelCatalogCache>()
+  /** Account whose snapshot currently lives in {@link catalog}; cleared on default change. */
+  private catalogOwner: string | undefined
 
   constructor(private readonly options: CodexAdapterOptions) {
     super()
@@ -531,8 +606,37 @@ export class CodexAdapter extends LlmAdapter {
   }
 
   /** Discovery fetcher: resolves the session through the refresh-aware path. */
-  private async fetchCatalog(): Promise<DiscoveredModel[]> {
-    return fetchCodexModels(await this.options.tokens.session(), this.options.fetchFn)
+  private async fetchCatalog(account?: string, signal?: AbortSignal): Promise<DiscoveredModel[]> {
+    return fetchCodexModels(await this.options.tokens.session(account), this.options.fetchFn, signal)
+  }
+
+  /** Drop cached catalogs after login/logout so the next list does not reuse a stale plan. */
+  clearAccountCatalog(account?: string): void {
+    if (account === undefined) this.accountCatalogs.clear()
+    else this.accountCatalogs.delete(account)
+    if (account === undefined || this.catalogOwner === account || this.catalogOwner === undefined) {
+      this.catalogOwner = undefined
+      this.catalog.invalidate()
+    }
+  }
+
+  /** Persisted cache for the default account; a throwaway cache for any other. */
+  private async catalogFor(account?: string): Promise<ModelCatalogCache> {
+    const defaultKey = await this.options.tokens.defaultAccount()
+    const key = account ?? defaultKey
+    if (key === undefined || key === defaultKey) {
+      if (this.catalogOwner !== undefined && this.catalogOwner !== defaultKey) {
+        this.catalog.invalidate()
+      }
+      this.catalogOwner = defaultKey
+      return this.catalog
+    }
+    let cache = this.accountCatalogs.get(key)
+    if (cache === undefined) {
+      cache = new ModelCatalogCache()
+      this.accountCatalogs.set(key, cache)
+    }
+    return cache
   }
 
   override providerInfo(provider: string): LlmProviderInfo {
@@ -549,18 +653,43 @@ export class CodexAdapter extends LlmAdapter {
   }
 
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
-    // Not logged in → empty catalog, so the web picker drops the provider.
-    const session = await this.options.tokens.peek()
-    if (session === undefined) return []
+    const own = await this.listOwnModels(provider)
+    const pool = this.options.pool?.()
+    if (pool === undefined) return own
+    const extra = await pool.modelsForProvider(provider as ProviderId)
+    const seen = new Set(own.map(model => model.id))
+    // Account pools reuse the catalog row; only configured tiers are extra.
+    return pickerModels([...own, ...extra.filter(model => !seen.has(model.id))])
+  }
+
+  /** The provider's own catalog: union of every account, or one account when named. */
+  async listOwnModels(provider: string, account?: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]> {
+    if (account === undefined) {
+      const accounts = (await this.options.tokens.list()).map(entry => entry.key)
+      if (accounts.length === 0) return []
+      return unionAccountCatalogs(
+        accounts,
+        (key, accountSignal) => this.listOwnModels(provider, key, accountSignal),
+        { timeoutMs: this.options.discoveryTimeoutMs ?? DISCOVERY_TIMEOUT_MS, ...signal === undefined ? {} : { signal } },
+      )
+    }
+    if (!await this.options.tokens.hasSession(account)) {
+      return []
+    }
     if (!this.options.discovery) return this.staticModels(provider)
+    const catalog = await this.catalogFor(account)
     try {
       // The fetcher runs only on a cache miss, and resolves the session
       // through the refresh-aware path so an expired access token renews here
       // instead of failing discovery into the static fallback.
-      const discovered = await this.catalog.get(() => this.fetchCatalog())
+      const discovered = await discoverOrRetryAuth(
+        force => this.options.tokens.session(account, force),
+        catalog,
+        () => catalog.get(() => this.fetchCatalog(account, signal)),
+      )
       const current = pickerModels(discovered)
       if (current.length === 0) {
-        this.catalog.invalidate()
+        catalog.invalidate()
         this.options.onWarn?.('codex cached catalog has no picker-visible GPT-5.6 models; using the built-in catalog')
         return this.staticModels(provider)
       }
@@ -570,13 +699,15 @@ export class CodexAdapter extends LlmAdapter {
         name: model.name,
         ...model.description === undefined ? {} : { description: model.description },
         inputModalities: CODEX_MODALITIES,
-      }))
+        ...model.priority === undefined ? {} : { priority: model.priority },
+      } as LlmModelInfo))
     } catch (error: unknown) {
+      // A cancelled discovery must not fall back to the static catalog — the
+      // caller (pool assembly) treats abort as "this account sits out".
+      if (isDiscoveryAborted(error, signal)) throw error
       // A permanent refresh failure deletes the stored session: the provider
       // is logged out, so hide it instead of showing a stale static catalog.
-      if (error instanceof LlmError
-        && (error.code === 'MISSING_CREDENTIAL' || error.code === 'INVALID_CREDENTIAL')) return []
-      if (error instanceof OAuthEndpointError && error.status === 401) this.catalog.invalidate()
+      if (isMissingOrInvalidCredential(error)) return []
       this.options.onWarn?.(
         `codex model discovery failed; using the built-in catalog (${errorChain(error)})`,
       )
@@ -593,8 +724,12 @@ export class CodexAdapter extends LlmAdapter {
    */
   private async discovered(model: string): Promise<DiscoveredModel | undefined> {
     if (!this.options.discovery || !CODEX_PICKER_MODEL_IDS.has(model)) return undefined
-    const models = await this.catalog.resolve(() => this.fetchCatalog())
-    return models?.find(entry => entry.id === model)
+    const accounts = (await this.options.tokens.list()).map(entry => entry.key)
+    return discoverAcrossAccounts(accounts, async account => {
+      const catalog = await this.catalogFor(account)
+      const models = await catalog.resolve(() => this.fetchCatalog(account))
+      return models?.find(entry => entry.id === model)
+    })
   }
 
   /** Whether the discovered catalog advertises a fast tier for this model. */
@@ -606,18 +741,52 @@ export class CodexAdapter extends LlmAdapter {
   async fastCapableModels(): Promise<string[]> {
     if (!this.options.discovery) return []
     // Not logged in → no fast models, so the Speed toggle hides after logout
-    // (mirrors the listModels guard above).
-    const session = await this.options.tokens.peek()
-    if (session === undefined) return []
-    const models = await this.catalog.resolve(() => this.fetchCatalog())
-    return pickerModels(models ?? []).filter(model => model.fastTier === true).map(model => model.id)
+    // (mirrors the listModels guard above). Union every account: a fast-capable
+    // model only the non-default lists (e.g. gpt-5.6-sol) must still show Speed.
+    const accounts = (await this.options.tokens.list()).map(entry => entry.key)
+    if (accounts.length === 0) return []
+    const seen = new Set<string>()
+    const ids: string[] = []
+    for (const account of accounts) {
+      try {
+        const catalog = await this.catalogFor(account)
+        const models = await catalog.resolve(() => this.fetchCatalog(account))
+        for (const model of pickerModels(models ?? [])) {
+          if (model.fastTier !== true || seen.has(model.id)) continue
+          seen.add(model.id)
+          ids.push(model.id)
+        }
+      } catch {
+        // sit out
+      }
+    }
+    return ids
   }
 
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    const pool = this.options.pool?.()
+    if (pool !== undefined && await pool.owns(provider as ProviderId, model)) {
+      return pool.resolveModel(provider, model)
+    }
+    return this.resolveOwnModel(provider, model)
+  }
+
+  /** Capability resolution of the provider's own models (the pool resolves members here). */
+  async resolveOwnModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     // Discovered metadata (when discovery is on) wins over the static entry;
-    // the static entry wins over the built-in defaults.
+    // the static entry wins over the built-in defaults. A configured default
+    // effort merges over both.
     const discovered = await this.discovered(model)
     const configured = this.options.models.find(entry => entry.id === model)
+    // `extendable` only while falling back to the built-in list: that one is
+    // known to trail the backend, so a configured level it omits still has to
+    // be selectable. A discovered catalog is the truth about what the model
+    // accepts, and a stale override must not be forced onto every request.
+    const reasoning = mergeReasoning(
+      this.options.defaultEffortOf?.(model),
+      discovered?.reasoning ?? { efforts: CODEX_EFFORTS, defaultEffort: CODEX_DEFAULT_EFFORT },
+      { extendable: discovered?.reasoning === undefined },
+    )
     return {
       provider,
       id: model,
@@ -626,18 +795,32 @@ export class CodexAdapter extends LlmAdapter {
       inputModalities: configured?.inputModalities ?? CODEX_MODALITIES,
       context: { contextWindow: discovered?.contextWindow ?? configured?.contextWindow ?? CODEX_CONTEXT_WINDOW },
       defaultMaxTokens: configured?.maxTokens ?? CODEX_DEFAULT_MAX_TOKENS,
-      reasoning: discovered?.reasoning ?? { efforts: CODEX_EFFORTS, defaultEffort: CODEX_DEFAULT_EFFORT },
+      ...(reasoning === undefined ? {} : { reasoning }),
     }
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const pool = this.options.pool?.()
+    if (pool !== undefined && await pool.owns(options.provider as ProviderId, options.model)) {
+      yield* pool.stream(options)
+      return
+    }
+    yield* this.streamCore(options)
+  }
+
+  /** Pool seam: stream through one specific account instead of the default. */
+  streamAccount(options: GenerateOptions, account: string): AsyncIterable<StreamChunk> {
+    return this.streamCore(options, account)
+  }
+
+  private async *streamCore(options: GenerateOptions, account?: string): AsyncIterable<StreamChunk> {
     const watchdog = idleWatchdog(options.signal, this.options.streamIdleTimeoutMs)
     try {
-      let session = await this.options.tokens.session()
+      let session = await this.options.tokens.session(account)
       let response = await this.request(options, session, watchdog.signal)
       if (response.status === 401) {
         // One forced refresh + retry on an unexpired-but-rejected token.
-        session = await this.options.tokens.session(true)
+        session = await this.options.tokens.session(account, true)
         response = await this.request(options, session, watchdog.signal)
       }
       if (!response.ok) throw await httpLlmError(response, 'codex API')
@@ -657,7 +840,7 @@ export class CodexAdapter extends LlmAdapter {
     const fast = this.options.speedFor !== undefined
       && await this.options.speedFor(options.sessionId, options.model)
     const body = codexRequestBody(options, toResponsesInput(messages, options.system), fast)
-    return fetch(CODEX_API_URL, {
+    return proxiedFetch(CODEX_API_URL, {
       method: 'POST',
       headers: {
         'authorization': `Bearer ${session.accessToken}`,

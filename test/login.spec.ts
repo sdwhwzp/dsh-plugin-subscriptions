@@ -24,11 +24,12 @@ import type { RpcResult } from '@deepseek-ai/dsh-host-apiproxy/api'
 import * as plugin from '../src/index.js'
 import { SubscriptionsAuthController } from '../src/index.js'
 import { OAuthFlowManager } from '../src/auth/oauth-flow.js'
+import { DeviceFlowManager } from '../src/auth/device-flow.js'
 import { readClaudeCodeCredentials } from '../src/auth/claude-code-creds.js'
 import {
   CLAUDE_AUTHORIZE_URL, CLAUDE_CALLBACK_PATH, CLAUDE_CLIENT_ID, CLAUDE_SCOPE, CLAUDE_TOKEN_URL,
 } from '../src/providers/claude.js'
-import { authFilePath, getSession } from '../src/auth/store.js'
+import { accountKeyOf, authFilePath, listAccounts } from '../src/auth/store.js'
 import type { ClaudeSession } from '../src/auth/store.js'
 
 const TEMP_DIRS: string[] = []
@@ -113,7 +114,14 @@ const VALID_BLOB = JSON.stringify({
 
 /** A controller with no LLM/RPC wiring: enough to drive `login` and `status`. */
 function makeController(readClaudeCreds: () => ClaudeSession | undefined, flows = new OAuthFlowManager()) {
-  return new SubscriptionsAuthController(flows, () => {}, () => undefined, {}, readClaudeCreds)
+  return new SubscriptionsAuthController(
+    flows,
+    new DeviceFlowManager(),
+    () => {},
+    () => undefined,
+    {},
+    readClaudeCreds,
+  )
 }
 
 /** A credentials directory holding one blob, cleaned up with the rest. */
@@ -200,8 +208,8 @@ test('login(claude): credentials found → instant import, session persisted', a
     const { authorizeUrl } = await controller.login('claude')
     assert.equal(authorizeUrl, '', 'the import path opens no browser')
 
-    assert.equal((await getSession('claude'))?.accessToken, FAKE_SESSION.accessToken)
-    assert.equal((await controller.status('claude')).loggedIn, true)
+    assert.equal((await listAccounts('claude'))[0]?.session.accessToken, FAKE_SESSION.accessToken)
+    assert.equal((await controller.status('claude')).accounts.length, 1)
   })
 })
 
@@ -209,13 +217,18 @@ test('login(claude): the shipped controller reads the credential store by defaul
   await inIsolatedHome(async () => {
     const dir = credentialsDir('claude-default-', VALID_BLOB)
     await withEnv('CLAUDE_CONFIG_DIR', dir, async () => {
-      // No fifth argument: this is the wiring `apply()` ships. Without it the
+      // No sixth argument: this is the wiring `apply()` ships. Without it the
       // plugin would never import a Claude Code session in production, and
       // every other test here would still pass.
-      const controller = new SubscriptionsAuthController(new OAuthFlowManager(), () => {}, () => undefined)
+      const controller = new SubscriptionsAuthController(
+        new OAuthFlowManager(),
+        new DeviceFlowManager(),
+        () => {},
+        () => undefined,
+      )
       const { authorizeUrl } = await controller.login('claude')
       assert.equal(authorizeUrl, '', 'the default reader found the credentials file')
-      assert.equal((await getSession('claude'))?.accessToken, 'test-access-token')
+      assert.equal((await listAccounts('claude'))[0]?.session.accessToken, 'test-access-token')
     })
   })
 })
@@ -279,7 +292,7 @@ test('login(claude): a later import cancels the OAuth attempt left in flight', a
       assert.equal(flows.isBusy('claude'), false, 'the stale attempt was cancelled')
       assert.equal(flows.pending('claude'), undefined)
       assert.equal((await controller.status('claude')).busy, false, 'the Settings card leaves the busy state')
-      assert.equal((await getSession('claude'))?.accessToken, FAKE_SESSION.accessToken)
+      assert.equal((await listAccounts('claude'))[0]?.session.accessToken, FAKE_SESSION.accessToken)
     } finally {
       // Without this an assertion failure leaves the callback server bound and
       // the test runner hangs until the flow's own timeout.
@@ -384,12 +397,12 @@ test('login(claude): an import beats a token exchange that is still running', as
 
       credentials = { ...FAKE_SESSION, accessToken: 'imported-cli' }
       await controller.login('claude')
-      assert.equal((await getSession('claude'))?.accessToken, 'imported-cli')
+      assert.equal((await listAccounts('claude'))[0]?.session.accessToken, 'imported-cli')
 
       held.release()
       await controller.settled('claude')
       assert.equal(
-        (await getSession('claude'))?.accessToken, 'imported-cli',
+        (await listAccounts('claude'))[0]?.session.accessToken, 'imported-cli',
         'the superseded exchange did not overwrite the imported session',
       )
     } finally {
@@ -416,8 +429,8 @@ test('login(claude): an import beats a token exchange that then fails', async ()
       held.release()
       await controller.settled('claude')
       const status = await controller.status('claude')
-      assert.equal(status.loggedIn, true, 'the imported session is still the stored one')
-      assert.equal((await getSession('claude'))?.accessToken, 'imported-cli')
+      assert.equal(status.accounts.length, 1, 'the imported session is still the stored one')
+      assert.equal((await listAccounts('claude'))[0]?.session.accessToken, 'imported-cli')
       assert.equal(status.detail, undefined, 'the superseded failure stayed off the status')
     } finally {
       held.restore()
@@ -432,16 +445,16 @@ test('login(claude): a logout beats a token exchange that is still running', asy
     const { authorizeUrl } = await controller.login('claude')
     const held = await deliverCallback(authorizeUrl, 'old-oauth')
     try {
-      await controller.logout('claude')
-      assert.equal(await getSession('claude'), undefined, 'the logout cleared the store')
+      await controller.logout('claude', accountKeyOf('claude', FAKE_SESSION))
+      assert.equal((await listAccounts('claude')).length, 0, 'the logout cleared the store')
 
       held.release()
       await controller.settled('claude')
       assert.equal(
-        await getSession('claude'), undefined,
+        (await listAccounts('claude')).length, 0,
         'the superseded exchange did not restore the session',
       )
-      assert.equal((await controller.status('claude')).loggedIn, false)
+      assert.equal((await controller.status('claude')).accounts.length, 0)
     } finally {
       held.restore()
     }
@@ -455,9 +468,9 @@ test('claude: an import and a logout fired together settle in call order', async
     // provider and the later call is the one that survives.
     const controller = makeController(() => ({ ...FAKE_SESSION, accessToken: 'imported-cli' }))
     const importing = controller.login('claude')
-    const loggingOut = controller.logout('claude')
+    const loggingOut = controller.logout('claude', accountKeyOf('claude', FAKE_SESSION))
     await Promise.all([importing, loggingOut])
-    assert.equal(await getSession('claude'), undefined, 'the logout was the later call, so it wins')
+    assert.equal((await listAccounts('claude')).length, 0, 'the logout was the later call, so it wins')
   })
 })
 
@@ -472,7 +485,7 @@ async function mountPlugin(): Promise<ConnectionRpcHandler> {
   ctx.provide('llm', { registerAdapter: () => Object.assign(() => {}, { replace: () => {} }) })
   ctx.provide('connection', {
     rpc: {
-      intercept: (_channel: string, _matches: (endpoint: string) => boolean, h: ConnectionRpcHandler) => {
+      handle: (_channel: string, h: ConnectionRpcHandler) => {
         handler = h
         return () => Promise.resolve()
       },
@@ -480,7 +493,7 @@ async function mountPlugin(): Promise<ConnectionRpcHandler> {
   })
   ctx.plugin(plugin, { providers: ['codex'] })
   await new Promise(resolve => setTimeout(resolve, 50))
-  assert.ok(handler !== undefined, 'the /api/subscriptions-auth/* endpoints were registered')
+  assert.ok(handler !== undefined, 'the /subscriptions-auth channel was registered')
   return handler
 }
 
@@ -488,7 +501,7 @@ function signal(): AbortSignal {
   return new AbortController().signal
 }
 
-interface StatusValue { providers: Record<string, { loggedIn: boolean; busy: boolean }> }
+interface StatusValue { providers: Record<string, { accounts: unknown[]; busy: boolean }> }
 
 /** Unwrap a successful RPC result, failing the test with its error otherwise. */
 function okValue<T>(result: RpcResult<unknown>, what: string): T {
@@ -503,23 +516,23 @@ test('auth RPC: status / login / cancel round trip', async () => {
     // consumes, without needing a credential reader injected anywhere.
     const handler = await mountPlugin()
 
-    const before = okValue<StatusValue>(await handler('subscriptions-auth/status', {}, signal(), undefined), 'status')
-    assert.equal(before.providers.codex.loggedIn, false)
+    const before = okValue<StatusValue>(await handler('status', {}, signal()), 'status')
+    assert.equal(before.providers.codex.accounts.length, 0)
     assert.equal(before.providers.codex.busy, false)
 
     try {
       const login = okValue<{ authorizeUrl: string }>(
-        await handler('subscriptions-auth/login', { provider: 'codex' }, signal(), undefined), 'login',
+        await handler('login', { provider: 'codex' }, signal()), 'login',
       )
       assert.ok(login.authorizeUrl.startsWith('https://'), 'login returns an authorize URL')
 
-      const during = okValue<StatusValue>(await handler('subscriptions-auth/status', {}, signal(), undefined), 'status while busy')
+      const during = okValue<StatusValue>(await handler('status', {}, signal()), 'status while busy')
       assert.equal(during.providers.codex.busy, true)
     } finally {
-      okValue(await handler('subscriptions-auth/cancel', { provider: 'codex' }, signal(), undefined), 'cancel')
+      okValue(await handler('cancel', { provider: 'codex' }, signal()), 'cancel')
     }
 
-    const after = okValue<StatusValue>(await handler('subscriptions-auth/status', {}, signal(), undefined), 'status after cancel')
+    const after = okValue<StatusValue>(await handler('status', {}, signal()), 'status after cancel')
     assert.equal(after.providers.codex.busy, false)
   })
 })
@@ -527,27 +540,8 @@ test('auth RPC: status / login / cancel round trip', async () => {
 test('auth RPC: an unknown provider is rejected, not dispatched', async () => {
   await inIsolatedHome(async () => {
     const handler = await mountPlugin()
-    const result = await handler('subscriptions-auth/login', { provider: 'gemini' }, signal(), undefined)
+    const result = await handler('login', { provider: 'gemini' }, signal())
     assert.equal(result.ok, false)
     if (!result.ok) assert.equal(result.error.code, 'bad-request')
-  })
-})
-
-test('auth RPC: subaccounts cannot change provider credentials', async () => {
-  await inIsolatedHome(async () => {
-    const handler = await mountPlugin()
-    const child = { source: 'dsh-passwords', id: '2', username: 'child', role: 'user' } as const
-    const requests = [
-      ['login', { provider: 'codex' }],
-      ['manual', { provider: 'codex', input: 'callback-code' }],
-      ['cancel', { provider: 'codex' }],
-      ['logout', { provider: 'codex' }],
-    ] as const
-
-    for (const [endpoint, payload] of requests) {
-      const result = await handler(`subscriptions-auth/${endpoint}`, payload, signal(), child)
-      assert.equal(result.ok, false, endpoint)
-      if (!result.ok) assert.match(result.error.message, /only to administrators/, endpoint)
-    }
   })
 })

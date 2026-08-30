@@ -1,4 +1,4 @@
-# dsh-plugin-subscriptions
+# dsh-plugin-subscriptions [![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
 
 English | [中文](README.zh.md)
 
@@ -14,7 +14,7 @@ Logged-in providers join the session model picker with their live model catalogs
 
 ![Model picker with subscription models](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/model-picker.png)
 
-Models that advertise reasoning levels get an **Effort** selector in the same menu — Codex models, and Grok 4.6 / 4.5 (levels and defaults come from each provider's live catalog, not a hardcoded list):
+Models that advertise reasoning levels get an **Effort** selector in the same menu — Codex models, Grok 4.6 / 4.5, and Copilot's reasoning models (levels and defaults come from each provider's live catalog, not a hardcoded list; Copilot's `capabilities.supports.reasoning_effort` array is sent as `reasoning_effort` on chat completions and `reasoning.effort` on the Responses wire). Models listing both Copilot endpoints (gpt-5.4, gpt-5-mini) normally speak chat completions but reroute to `/responses` when a request combines function tools with an effort — Copilot rejects that combination on the chat wire:
 
 ![Reasoning effort selector](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/model-effort.png)
 
@@ -41,14 +41,15 @@ The `video_generate` tool plays the generated clip inline:
 | `codex`  | ChatGPT Plus/Pro  | GPT-5.6 Sol, Terra, and Luna from the live catalog |
 | `claude` | Claude Pro/Max    | all models available in your subscription (Opus, Sonnet, Haiku, Fable — static catalog, updated with the plugin) |
 | `grok`   | X Premium (xAI)   | live catalog from `api.x.ai/v1/models` (chat models only); reasoning efforts from the Grok CLI catalog (`cli-chat-proxy.grok.com/v1/models`) |
+| `copilot` | GitHub Copilot   | live catalog from `api.githubcopilot.com/models` (chat models on both wires, with per-model vision flags and reasoning efforts); login uses the OAuth device flow (enter the shown code at `github.com/login/device`) |
 
 Only logged-in providers appear in the session model picker; the lists above refresh on login/logout. Vision-capable models declare `['text', 'image']` input modalities, and image content is translated to each provider's wire format.
 
-The ChatGPT picker exposes only GPT-5.6 Sol, Terra, and Luna. Older entries are removed from live, persisted, configured, and fallback catalogs; Claude and Grok catalogs are unchanged.
+The ChatGPT picker exposes only GPT-5.6 Sol, Terra, and Luna. Older entries are removed from live, persisted, configured, pool-tier, and fallback catalogs; Claude, Grok, and Copilot catalogs are unchanged.
 
-Logged-in cards also show **subscription usage** — per rate-limit window (5-hour session, weekly, and per-model weekly where the plan has one) with the used percentage, a progress bar, and the reset time, plus a Refresh button. Codex usage comes from `chatgpt.com/backend-api/wham/usage` (also reports the plan), Claude usage from `api.anthropic.com/api/oauth/usage`, and Grok usage from the Grok Build CLI proxy's `cli-chat-proxy.grok.com/v1/billing` (the source of the CLI's `/usage` panel; reports the shared weekly pool and the subscription tier).
+Logged-in cards also show **subscription usage** — per rate-limit window (5-hour session, weekly, and per-model weekly where the plan has one) with the used percentage, a progress bar, and the reset time, plus a Refresh button. Codex usage comes from `chatgpt.com/backend-api/wham/usage` (also reports the plan), Claude usage from `api.anthropic.com/api/oauth/usage`, and Grok usage from the Grok Build CLI proxy's `cli-chat-proxy.grok.com/v1/billing` (the source of the CLI's `/usage` panel; reports the shared weekly pool and the subscription tier). Copilot exposes no usage endpoint, so its card shows no usage section.
 
-Provider credentials and provider-level subscription usage are administrator-only when the host supplies authenticated account roles. Subaccounts can use the models assigned by the host, but the browser does not render login, logout, manual authorization, or provider quota controls. Direct credential-management and `usage` RPC calls are also rejected on the server.
+Provider credentials, account identities, proxy settings, model-default controls, and provider-level usage are administrator-only when the host supplies authenticated account roles. Subaccounts can use models assigned by the host, but the browser does not render login, logout, manual authorization, provider accounts, or quota controls; the server rejects the corresponding direct RPC calls.
 
 Also included, registered when the matching provider is enabled:
 
@@ -114,6 +115,16 @@ Either way, restart `dsh web` afterwards so the new version loads.
 
 Not logged in? The provider stays out of the picker, and requests fail with `MISSING_CREDENTIAL` pointing at the Settings page; nothing else breaks.
 
+### Multiple accounts
+
+Every provider accepts several accounts: once one is connected, the card grows an **Add account** button (Claude offers **Browser authorization** and **Import Claude Code** separately). Accounts are keyed by their identity (email / login) — re-logging the same account updates it in place, a different account appends. Browser authorization signs in whichever account the browser currently uses, so switch accounts there first (or use an incognito window with the manual code) to add a different one. The ★ default account serves the direct provider routes; pool routes use every account. A Claude account imported from Claude Code stays synced with the CLI's credential store; OAuth-added Claude accounts refresh standalone so several accounts never fight over the Keychain entry.
+
+### Default reasoning effort per model
+
+Every logged-in provider card in Settings → Subscriptions carries a collapsible **Default reasoning effort** section. It starts collapsed — the header shows how many models advertise reasoning levels and how many you have overridden — and the model list (with its live catalog lookup) loads only once you expand it, so a provider with dozens of models does not stretch the page or make it pay for a lookup nobody asked for. Expanded, each model that advertises reasoning levels gets a row whose options are the levels that provider's live catalog advertises for that exact model; past 8 such models the section also offers a name filter, and models without reasoning levels collapse into a single count line instead of one dead row each. With several accounts connected, the model list is the union across that provider's accounts, so a model any account advertises gets a row; the levels offered for it come from the first account whose catalog lists it (the ★ default account first), matching what the session picker resolves.
+
+Pick a level to make the session model picker preselect it whenever you switch to the model — no more settling for the provider's own default (e.g. Claude shows `Default`, Codex models follow `default_reasoning_level`). Choose **Follow provider** to clear the override. The choice is stored in `~/.dsh/plugins/subscriptions/model-defaults.json` (mode 0600) and survives restarts.
+
 ## Config
 
 ```yaml
@@ -125,7 +136,52 @@ Not logged in? The provider stays out of the picker, and requests fail with `MIS
     models:                            # override the discovered/built-in catalogs
       codex:
         - { id: gpt-5.6-sol, name: GPT-5.6 Sol, contextWindow: 272000, inputModalities: [text, image] }
+      copilot:                         # manual entries disable Copilot catalog discovery
+        - { id: gpt-5.6-sol, wire: responses }   # copilot only: force the upstream protocol
 ```
+
+`wire` (copilot entries only) pins a model to `chat-completions` or `responses`. Manual
+entries keep working without it — the field exists because a configured model the live
+catalog does not know would otherwise default to `/chat/completions`, which
+responses-only families (gpt-5.5/5.6, …) reject. Pinning `chat-completions` also opts
+out of the tools+effort auto-reroute described above.
+
+## Model pools
+
+When a provider has **two or more logged-in accounts**, the picker shows the **union** of every account's catalog (duplicates dropped). Pick `claude-sonnet-5` under Claude (or `gpt-5.4` under ChatGPT) as usual — there is no extra pool group and no new model id.
+
+- **Shared models.** A model listed by ≥2 accounts failovers between them (sticky, quota-aware). Each account is discovered separately, so a Plus login is not asked to serve a Pro-only model.
+- **Account-only models.** A model listed by only one account is sent to that account. It still appears in the picker even if that account is not the default.
+- **Explicit account lists (`families`).** Replace the auto member list for one catalog model (same provider only; cross-provider members are ignored). Pin `account` or omit it for the default.
+- **Tier extras (`tiers`, optional).** Extra picker rows with heterogeneous fallbacks, listed under the first member's provider. Not created automatically.
+
+Selection is sticky per session (prompt caches survive) with two strategies: `priority` (first healthy member wins) and `quota_aware` (the default — each member is scored by its required burn rate, `remaining quota / time until window reset`, so a window about to reset with plenty left gets spent instead of wasted; the sticky member holds until a challenger out-scores it by `switchMargin`). Members past 95% on any usage window are gated out; failures fail over before the first stream chunk with cooldowns (`retry-after` when the provider sends one) — quota and auth failures cool the whole account down (its quota is account-level; Claude's model-scoped lanes cool per member), transient server failures cool only the failing member. Copilot exposes no usage telemetry, so it scores zero and naturally serves as the fallback of last resort.
+
+```yaml
+- id: llm-subscriptions
+  name: dsh-plugin-subscriptions
+  config:
+    pool:
+      enabled: true                   # default; needs ≥2 accounts of one provider
+      strategy: quota_aware           # or priority
+      switchMargin: 2                 # hysteresis factor for quota_aware
+      autoAccounts: true              # pool each catalog model across that provider's accounts
+      families:                       # explicit account list for one catalog model (same provider)
+        claude-sonnet-5:
+          - { provider: claude, model: claude-sonnet-5 }                   # default account
+          - { provider: claude, account: bob@example.com, model: claude-sonnet-5 }
+      tiers:                          # optional extra picker rows
+        smart:
+          - { provider: claude, model: claude-sonnet-5 }
+          - { provider: codex, model: gpt-5.6-sol }
+          - { provider: grok, model: grok-4.6 }
+```
+
+## Proxy
+
+Every subscription request — token exchanges, model-API streams, usage lookups, model discovery, and the `x_search` / `image_generate` / `video_generate` tools — can be routed through an HTTP(S) proxy. Configure it in **Settings → Subscriptions → Proxy → Configure…**: enable the flag, enter the proxy URL (`http://127.0.0.1:7890`), optional username/password, and an optional comma-separated bypass list of hostnames that stay direct (`127.0.0.1`, `localhost`, `*.example.com`). The password is stored in `~/.dsh/plugins/subscriptions/proxy.json` (mode 0600) and is never returned to the browser. A "Test" button probes one endpoint through the current configuration and shows the HTTP status/latency.
+
+Changes apply immediately to subsequent requests — no restart needed. The OAuth authorization page opens in your browser and follows the browser/system proxy, not this setting. SOCKS proxies are not supported.
 
 ## Develop
 
@@ -143,7 +199,7 @@ After `pnpm build`, restart `dsh web` to pick up changes.
 
 - `src/index.ts` — plugin entry: config schema, adapter registration, auth-change re-announce, RPC wiring
 - `src/auth/` — PKCE/JWT helpers, token store, OAuth flow engine (temp loopback callback server), Claude Code credential reader (Keychain/file), authenticated `/api/subscriptions-auth/*` RPC endpoints
-- `src/providers/` — per-provider OAuth constants/exchange/refresh + `LlmAdapter`s
+- `src/providers/` — per-provider OAuth constants/exchange/refresh + `LlmAdapter`s, multi-account token plumbing (`accounts.ts`), and the pool (`pool.ts` + `pool-health.ts` / `pool-usage.ts` / `pool-family.ts`)
 - `src/translate/` — dsh `Message[]` ⟷ OpenAI Responses / Anthropic Messages wire formats, SSE → `StreamChunk`
 - `src/tools/` — `x_search`, `image_generate`, and `video_generate`
 - `src/client/` — the Settings → Subscriptions page (browser half, zh/en, theme-token aware)
