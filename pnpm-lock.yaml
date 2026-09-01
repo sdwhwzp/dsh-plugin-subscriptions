@@ -16,74 +16,74 @@ importers:
         version: 4.5.1
     devDependencies:
       '@deepseek-ai/cordis':
-        specifier: link:../dsh-deploy-28-ede2a571/vendor/cordis
-        version: link:../dsh-deploy-28-ede2a571/vendor/cordis
+        specifier: link:../deepseek-harness/vendor/cordis
+        version: link:../deepseek-harness/vendor/cordis
       '@deepseek-ai/dsh-api-gateway':
-        specifier: link:../dsh-deploy-28-ede2a571/packages/api/gateway
-        version: link:../dsh-deploy-28-ede2a571/packages/api/gateway
+        specifier: link:../deepseek-harness/packages/api/gateway
+        version: link:../deepseek-harness/packages/api/gateway
       '@deepseek-ai/dsh-api-remotes':
-        specifier: link:../dsh-deploy-28-ede2a571/packages/api/remotes
-        version: link:../dsh-deploy-28-ede2a571/packages/api/remotes
+        specifier: link:../deepseek-harness/packages/api/remotes
+        version: link:../deepseek-harness/packages/api/remotes
       '@deepseek-ai/dsh-api-session-controller':
-        specifier: link:../dsh-deploy-28-ede2a571/packages/api/session-controller
-        version: link:../dsh-deploy-28-ede2a571/packages/api/session-controller
+        specifier: link:../deepseek-harness/packages/api/session-controller
+        version: link:../deepseek-harness/packages/api/session-controller
       '@deepseek-ai/dsh-attachment':
-        specifier: link:../dsh-deploy-28-ede2a571/packages/attachment/attachment
-        version: link:../dsh-deploy-28-ede2a571/packages/attachment/attachment
+        specifier: link:../deepseek-harness/packages/attachment/attachment
+        version: link:../deepseek-harness/packages/attachment/attachment
       '@deepseek-ai/dsh-client-locale':
-        specifier: link:../dsh-deploy-28-ede2a571/packages/client/locale
-        version: link:../dsh-deploy-28-ede2a571/packages/client/locale
+        specifier: link:../deepseek-harness/packages/client/locale
+        version: link:../deepseek-harness/packages/client/locale
       '@deepseek-ai/dsh-client-store':
-        specifier: link:../dsh-deploy-28-ede2a571/packages/client/store
-        version: link:../dsh-deploy-28-ede2a571/packages/client/store
+        specifier: link:../deepseek-harness/packages/client/store
+        version: link:../deepseek-harness/packages/client/store
       '@deepseek-ai/dsh-client-ui-chat':
-        specifier: link:../dsh-deploy-28-ede2a571/packages/client/ui-chat
-        version: link:../dsh-deploy-28-ede2a571/packages/client/ui-chat
+        specifier: link:../deepseek-harness/packages/client/ui-chat
+        version: link:../deepseek-harness/packages/client/ui-chat
       '@deepseek-ai/dsh-client-ui-commands':
-        specifier: link:../dsh-deploy-28-ede2a571/packages/client/ui-commands
-        version: link:../dsh-deploy-28-ede2a571/packages/client/ui-commands
+        specifier: link:../deepseek-harness/packages/client/ui-commands
+        version: link:../deepseek-harness/packages/client/ui-commands
       '@deepseek-ai/dsh-client-ui-conversation':
-        specifier: link:../dsh-deploy-28-ede2a571/packages/client/ui-conversation
-        version: link:../dsh-deploy-28-ede2a571/packages/client/ui-conversation
+        specifier: link:../deepseek-harness/packages/client/ui-conversation
+        version: link:../deepseek-harness/packages/client/ui-conversation
       '@deepseek-ai/dsh-client-ui-model-selection':
-        specifier: link:../dsh-deploy-28-ede2a571/packages/client/ui-model-selection
-        version: link:../dsh-deploy-28-ede2a571/packages/client/ui-model-selection
+        specifier: link:../deepseek-harness/packages/client/ui-model-selection
+        version: link:../deepseek-harness/packages/client/ui-model-selection
       '@deepseek-ai/dsh-client-ui-primitives':
-        specifier: link:../dsh-deploy-28-ede2a571/packages/client/ui-primitives
-        version: link:../dsh-deploy-28-ede2a571/packages/client/ui-primitives
+        specifier: link:../deepseek-harness/packages/client/ui-primitives
+        version: link:../deepseek-harness/packages/client/ui-primitives
       '@deepseek-ai/dsh-client-ui-renderer':
-        specifier: link:../dsh-deploy-28-ede2a571/packages/client/ui-renderer
-        version: link:../dsh-deploy-28-ede2a571/packages/client/ui-renderer
+        specifier: link:../deepseek-harness/packages/client/ui-renderer
+        version: link:../deepseek-harness/packages/client/ui-renderer
       '@deepseek-ai/dsh-client-ui-settings':
-        specifier: link:../dsh-deploy-28-ede2a571/packages/client/ui-settings
-        version: link:../dsh-deploy-28-ede2a571/packages/client/ui-settings
+        specifier: link:../deepseek-harness/packages/client/ui-settings
+        version: link:../deepseek-harness/packages/client/ui-settings
       '@deepseek-ai/dsh-client-ui-slots':
-        specifier: link:../dsh-deploy-28-ede2a571/packages/client/ui-slots
-        version: link:../dsh-deploy-28-ede2a571/packages/client/ui-slots
+        specifier: link:../deepseek-harness/packages/client/ui-slots
+        version: link:../deepseek-harness/packages/client/ui-slots
       '@deepseek-ai/dsh-commands':
-        specifier: link:../dsh-deploy-28-ede2a571/packages/interaction/commands
-        version: link:../dsh-deploy-28-ede2a571/packages/interaction/commands
+        specifier: link:../deepseek-harness/packages/interaction/commands
+        version: link:../deepseek-harness/packages/interaction/commands
       '@deepseek-ai/dsh-home-paths':
-        specifier: link:../dsh-deploy-28-ede2a571/packages/util/home-paths
-        version: link:../dsh-deploy-28-ede2a571/packages/util/home-paths
+        specifier: link:../deepseek-harness/packages/util/home-paths
+        version: link:../deepseek-harness/packages/util/home-paths
       '@deepseek-ai/dsh-llm':
-        specifier: link:../dsh-deploy-28-ede2a571/packages/llm/llm
-        version: link:../dsh-deploy-28-ede2a571/packages/llm/llm
+        specifier: link:../deepseek-harness/packages/llm/llm
+        version: link:../deepseek-harness/packages/llm/llm
       '@deepseek-ai/dsh-session':
-        specifier: link:../dsh-deploy-28-ede2a571/packages/core/session
-        version: link:../dsh-deploy-28-ede2a571/packages/core/session
+        specifier: link:../deepseek-harness/packages/core/session
+        version: link:../deepseek-harness/packages/core/session
       '@deepseek-ai/dsh-tools':
-        specifier: link:../dsh-deploy-28-ede2a571/packages/core/tools
-        version: link:../dsh-deploy-28-ede2a571/packages/core/tools
+        specifier: link:../deepseek-harness/packages/core/tools
+        version: link:../deepseek-harness/packages/core/tools
       '@deepseek-ai/dsh-typert-generator':
-        specifier: link:../dsh-deploy-28-ede2a571/packages/typert/generator
-        version: link:../dsh-deploy-28-ede2a571/packages/typert/generator
+        specifier: link:../deepseek-harness/packages/typert/generator
+        version: link:../deepseek-harness/packages/typert/generator
       '@deepseek-ai/dsh-typert-protocol':
-        specifier: link:../dsh-deploy-28-ede2a571/packages/typert/protocol
-        version: link:../dsh-deploy-28-ede2a571/packages/typert/protocol
+        specifier: link:../deepseek-harness/packages/typert/protocol
+        version: link:../deepseek-harness/packages/typert/protocol
       '@deepseek-ai/schemastery':
-        specifier: link:../dsh-deploy-28-ede2a571/vendor/schemastery
-        version: link:../dsh-deploy-28-ede2a571/vendor/schemastery
+        specifier: link:../deepseek-harness/vendor/schemastery
+        version: link:../deepseek-harness/vendor/schemastery
       '@types/node':
         specifier: ^24.0.0
         version: 24.13.3

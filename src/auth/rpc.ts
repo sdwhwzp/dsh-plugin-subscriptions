@@ -9,7 +9,8 @@ import type {} from '@deepseek-ai/dsh-api-gateway/types'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { AuthenticatedPrincipal } from '@deepseek-ai/dsh-llm'
-import { Remote, TypertRemoteFailure, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
+import { Remote, RemoteError, TypertRemoteService, remoteErrorOf } from '@deepseek-ai/dsh-typert-protocol'
+import type { RemoteFailure } from '@deepseek-ai/dsh-typert-protocol'
 import type { SubscriptionJsonValue } from '../wire.js'
 import { PROVIDER_IDS, type ProviderId } from './store.js'
 import type { ProviderUsage } from '../providers/common.js'
@@ -184,15 +185,17 @@ function ok(value: unknown): SubscriptionJsonValue {
   return value as SubscriptionJsonValue
 }
 
-function failure(error: unknown): TypertRemoteFailure {
+function failure(error: unknown): RemoteFailure {
+  const existing = remoteErrorOf(error)
+  if (existing !== undefined) return existing
   const message = error instanceof Error ? error.message : String(error)
   if (error instanceof BadRequest) {
-    return new TypertRemoteFailure({ code: 'bad-request', message, details: { issues: [] } })
+    return new RemoteError('gateway/bad-request', message, { issues: [] })
   }
   if (error instanceof AdminForbidden) {
-    return new TypertRemoteFailure({ code: 'forbidden', message, details: {} })
+    return new RemoteError('subscriptions/admin-forbidden', message, {})
   }
-  return new TypertRemoteFailure({ code: 'internal', message, details: {} })
+  return new RemoteError('gateway/internal', message, {})
 }
 
 /** Whether this verified caller may inspect provider-level subscription quota. */
@@ -544,7 +547,7 @@ export class SubscriptionsAuthRemote extends TypertRemoteService {
    * @param payload - lossless JSON action payload.
    * @param signal - caller cancellation for provider I/O and attachment reads.
    * @returns the action-specific lossless JSON value.
-   * @throws TypertRemoteFailure for validation, authorization, or provider failures.
+   * @throws RemoteError for validation, authorization, or provider failures.
    */
   @Remote('execute')
   async execute(

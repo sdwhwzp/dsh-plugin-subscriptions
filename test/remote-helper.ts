@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { AuthenticatedPrincipal } from '@deepseek-ai/dsh-llm'
-import { TypertRemoteFailure, type RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
+import { remoteErrorOf, type RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { SubscriptionJsonValue } from '../src/wire.js'
 
 /** Test-only call surface matching the generated unary Remote client. */
@@ -36,7 +36,8 @@ export function prepareTestRemote(ctx: Context): TestRemoteHandler {
       )
       return { ok: true, value }
     } catch (error: unknown) {
-      if (error instanceof TypertRemoteFailure) return { ok: false, error: error.failure }
+      const failure = remoteErrorOf(error)
+      if (failure !== undefined) return { ok: false, error: failure }
       throw error
     } finally {
       currentPrincipal = undefined

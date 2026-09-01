@@ -220,8 +220,10 @@ Changes apply immediately to subsequent requests — no restart needed. The OAut
 
 ## Develop
 
+This release requires DeepSeek Harness `0.1.2-alpha.3` or later. Its browser half uses the Alpha.3 API Remotes and Client Store platform modules instead of the removed `dsh-client-runtime`; Host Remote failures use the Alpha.3 namespaced error vocabulary.
+
 ```sh
-pnpm install   # devDependencies link to ../../deepseek-harness
+pnpm install   # devDependencies link to an adjacent Alpha.3 deepseek-harness checkout
 pnpm build     # tsc (lib/) + tsdown (lib/client.js browser bundle)
 pnpm test      # node --test over compiled unit specs
 ```

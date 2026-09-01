@@ -61,7 +61,7 @@ test('image endpoint: no attachment service → internal error result', async ()
   const result = await call(handler, REF)
   assert.equal(result.ok, false)
   if (!result.ok) {
-    assert.equal(result.error.code, 'internal')
+    assert.equal(result.error.code, 'gateway/internal')
     assert.match(result.error.message, /no attachment service/)
   }
 })
@@ -73,7 +73,7 @@ test('image endpoint: read failure → internal error result with the message', 
   const result = await call(handler, REF)
   assert.equal(result.ok, false)
   if (!result.ok) {
-    assert.equal(result.error.code, 'internal')
+    assert.equal(result.error.code, 'gateway/internal')
     assert.match(result.error.message, /digest mismatch/)
   }
 })
@@ -93,7 +93,7 @@ test('image endpoint: payload validation', async () => {
     const result = await call(handler, payload)
     assert.equal(result.ok, false, JSON.stringify(payload))
     if (!result.ok) {
-      assert.equal(result.error.code, 'bad-request')
+      assert.equal(result.error.code, 'gateway/bad-request')
       assert.match(result.error.message, pattern)
     }
   }
@@ -121,11 +121,11 @@ test('video endpoint: name validation and missing file', async () => {
   for (const payload of bad) {
     const result = await handler('subscriptions-auth/video', payload, new AbortController().signal, undefined)
     assert.equal(result.ok, false, JSON.stringify(payload))
-    if (!result.ok) assert.equal(result.error.code, 'bad-request')
+    if (!result.ok) assert.equal(result.error.code, 'gateway/bad-request')
   }
   const missing = await handler('subscriptions-auth/video', { name: 'absent.mp4' }, new AbortController().signal, undefined)
   assert.equal(missing.ok, false)
-  if (!missing.ok) assert.equal(missing.error.code, 'internal')
+  if (!missing.ok) assert.equal(missing.error.code, 'gateway/internal')
 })
 
 test('speed endpoints: per-session tier round trip and payload validation', async () => {
@@ -165,7 +165,7 @@ test('speed endpoints: per-session tier round trip and payload validation', asyn
     const result = await handler(`subscriptions-auth/${endpoint}`, payload, signal, undefined)
     assert.equal(result.ok, false, JSON.stringify(payload))
     if (!result.ok) {
-      assert.equal(result.error.code, 'bad-request')
+      assert.equal(result.error.code, 'gateway/bad-request')
       assert.match(result.error.message, pattern)
     }
   }

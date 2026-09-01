@@ -299,7 +299,7 @@ test('usage endpoint: logged-out provider answers an error result', async () => 
   const result = await handler('usage', { provider: 'codex', account: 'a1' }, new AbortController().signal)
   assert.equal(result.ok, false)
   if (!result.ok) {
-    assert.equal(result.error.code, 'internal')
+    assert.equal(result.error.code, 'gateway/internal')
     assert.match(result.error.message, /not logged in/)
   }
 })
@@ -308,14 +308,14 @@ test('usage endpoint: payload validation rejects unknown providers', async () =>
   const handler = await mount()
   const result = await handler('usage', { provider: 'gemini' }, new AbortController().signal)
   assert.equal(result.ok, false)
-  if (!result.ok) assert.equal(result.error.code, 'bad-request')
+  if (!result.ok) assert.equal(result.error.code, 'gateway/bad-request')
 })
 
 test('usage endpoint: payload validation rejects a non-boolean force flag', async () => {
   const handler = await mount()
   const result = await handler('usage', { provider: 'codex', account: 'a1', force: 'yes' }, new AbortController().signal)
   assert.equal(result.ok, false)
-  if (!result.ok) assert.equal(result.error.code, 'bad-request')
+  if (!result.ok) assert.equal(result.error.code, 'gateway/bad-request')
 })
 
 // ---------------------------------------------------------------------------
@@ -378,7 +378,7 @@ test('usage endpoint: subaccounts cannot inspect provider quota', async () => {
     )
     assert.equal(result.ok, false)
     if (!result.ok) {
-      assert.equal(result.error.code, 'forbidden')
+      assert.equal(result.error.code, 'subscriptions/admin-forbidden')
       assert.match(result.error.message, /only to administrators$/)
     }
   } finally {

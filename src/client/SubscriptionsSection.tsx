@@ -14,7 +14,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
-import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
+import type { RemoteResult } from '@deepseek-ai/dsh-api-remotes/client'
 import type { SubscriptionJsonValue } from '../wire.js'
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'

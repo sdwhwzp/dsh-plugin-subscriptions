@@ -7,7 +7,7 @@
  * page text follow the active locale.
  */
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
-import type {} from '@deepseek-ai/dsh-api-gateway/client'
+import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import subscriptionsAuthRemote from 'dsh-plugin-subscriptions/remote'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 // Type-only: pulls the shell's SlotMap merge (the 'settings.section' entry).

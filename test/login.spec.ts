@@ -533,7 +533,7 @@ test('auth RPC: an unknown provider is rejected, not dispatched', async () => {
     const handler = await mountPlugin()
     const result = await handler('login', { provider: 'gemini' }, signal())
     assert.equal(result.ok, false)
-    if (!result.ok) assert.equal(result.error.code, 'bad-request')
+    if (!result.ok) assert.equal(result.error.code, 'gateway/bad-request')
   })
 })
 
@@ -552,7 +552,7 @@ test('auth RPC: subaccounts cannot change provider credentials', async () => {
       const result = await handler(`subscriptions-auth/${endpoint}`, payload, signal(), child)
       assert.equal(result.ok, false, endpoint)
       if (!result.ok) {
-        assert.equal(result.error.code, 'forbidden', endpoint)
+        assert.equal(result.error.code, 'subscriptions/admin-forbidden', endpoint)
         assert.match(result.error.message, /only to administrators$/, endpoint)
       }
     }
