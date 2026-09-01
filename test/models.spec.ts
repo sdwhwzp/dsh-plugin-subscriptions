@@ -21,7 +21,7 @@ import { withTimeout } from '../src/providers/common.js'
 
 const STATIC_CODEX = [{ id: 'gpt-5.6-sol', name: 'GPT-5.1 Codex' }]
 const STATIC_CLAUDE = [{ id: 'claude-opus-4-5', name: 'Claude Opus 4.5' }]
-const STATIC_GROK = [{ id: 'grok-4', name: 'Grok 4' }]
+const STATIC_GROK = [{ id: 'grok-4.6', name: 'Grok 4.6' }]
 
 const codexSession: CodexSession = {
   accessToken: 'at',
@@ -301,8 +301,16 @@ test('codex config override wins over discovery entirely', async () => {
   assert.equal(calls(), 0)
 })
 
-test('grok discovery maps the data array', async () => {
-  const { fetchFn } = fakeFetch({ data: [{ id: 'grok-4-1' }, { id: 'grok-code-2' }, { nope: true }] })
+test('grok discovery keeps only Grok 4.6 and Grok 4.5', async () => {
+  const { fetchFn } = fakeFetch({
+    data: [
+      { id: 'grok-4.6' },
+      { id: 'grok-4.5' },
+      { id: 'grok-4.20' },
+      { id: 'grok-build-0.1' },
+      { nope: true },
+    ],
+  })
   const adapter = new GrokAdapter({
     models: STATIC_GROK,
     streamIdleTimeoutMs: 1000,
@@ -311,7 +319,36 @@ test('grok discovery maps the data array', async () => {
     fetchFn,
   })
   const models = await adapter.listModels('grok')
-  assert.deepEqual(models.map(model => model.id), ['grok-4-1', 'grok-code-2'])
+  assert.deepEqual(models.map(model => model.id), ['grok-4.6', 'grok-4.5'])
+})
+
+test('grok configured catalog keeps only Grok 4.6 and Grok 4.5', async () => {
+  const adapter = new GrokAdapter({
+    models: [
+      { id: 'grok-build-0.1' },
+      { id: 'grok-4.5', name: 'Grok 4.5' },
+      { id: 'grok-4.6', name: 'Grok 4.6' },
+    ],
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens(grokSession),
+    discovery: false,
+  })
+  assert.deepEqual((await adapter.listModels('grok')).map(model => model.id), ['grok-4.5', 'grok-4.6'])
+})
+
+test('grok rejects restored or crafted models outside the customer allowlist', async () => {
+  const adapter = new GrokAdapter({
+    models: STATIC_GROK,
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens(grokSession),
+    discovery: false,
+  })
+  await assert.rejects(
+    adapter.resolveModel('grok', 'grok-build-0.1'),
+    { code: 'UNKNOWN_MODEL' },
+  )
+  const stream = adapter.stream({ provider: 'grok', model: 'grok-build-0.1', messages: [] })
+  await assert.rejects(stream[Symbol.asyncIterator]().next(), { code: 'UNKNOWN_MODEL' })
 })
 
 test('claude logged in returns the static catalog', async () => {
@@ -495,7 +532,7 @@ test('claudeRequestBody omits tools, thinking and effort when the request carrie
   assert.equal(body.max_tokens, 32_000)
 })
 
-test('modalities: codex and claude declare image input; grok gates text-only models', async () => {
+test('modalities: codex, claude, and the allowed Grok models accept image input', async () => {
   const codex = codexAdapter({ session: codexSession, discovery: false })
   const codexModels = await codex.listModels('codex')
   assert.deepEqual(codexModels[0].inputModalities, ['text', 'image'])
@@ -511,17 +548,16 @@ test('modalities: codex and claude declare image input; grok gates text-only mod
   assert.deepEqual((await claude.listModels('claude'))[0].inputModalities, ['text', 'image'])
 
   const grok = new GrokAdapter({
-    models: [{ id: 'grok-4' }, { id: 'grok-code-fast-1' }, { id: 'grok-embedding-1' }],
+    models: [{ id: 'grok-4.6' }, { id: 'grok-4.5' }],
     streamIdleTimeoutMs: 1000,
     tokens: memoryTokens(grokSession),
     discovery: false,
   })
   const grokModels = await grok.listModels('grok')
   assert.deepEqual(grokModels[0].inputModalities, ['text', 'image'])
-  assert.deepEqual(grokModels[1].inputModalities, ['text'])
-  assert.deepEqual(grokModels[2].inputModalities, ['text'])
+  assert.deepEqual(grokModels[1].inputModalities, ['text', 'image'])
   assert.deepEqual((await grok.resolveModel('grok', 'grok-4.6')).inputModalities, ['text', 'image'])
-  assert.deepEqual((await grok.resolveModel('grok', 'grok-code-fast-1')).inputModalities, ['text'])
+  assert.deepEqual((await grok.resolveModel('grok', 'grok-4.5')).inputModalities, ['text', 'image'])
 })
 
 test('modalities: config entry inputModalities win over the provider default', async () => {
@@ -535,7 +571,7 @@ test('modalities: config entry inputModalities win over the provider default', a
   assert.deepEqual((await adapter.resolveModel('codex', 'gpt-5.6-sol')).inputModalities, ['text'])
 })
 
-test('grok discovery drops generation and embedding models', async () => {
+test('grok discovery drops every model outside the customer allowlist', async () => {
   const { fetchFn } = fakeFetch({
     data: [
       { id: 'grok-4.6' },
@@ -554,7 +590,7 @@ test('grok discovery drops generation and embedding models', async () => {
     fetchFn,
   })
   const models = await adapter.listModels('grok')
-  assert.deepEqual(models.map(model => model.id), ['grok-4.6', 'grok-build-0.1'])
+  assert.deepEqual(models.map(model => model.id), ['grok-4.6'])
 })
 
 /** The api.x.ai model list: authoritative for which models exist. */
@@ -615,7 +651,7 @@ test('grok discovery merges CLI-catalog reasoning metadata by model id', async (
     fetchFn: grokDualFetch(),
   })
   const models = await adapter.listModels('grok')
-  assert.deepEqual(models.map(model => model.name), ['Grok 4.6', 'Grok 4.5', 'grok-build-0.1'])
+  assert.deepEqual(models.map(model => model.name), ['Grok 4.6', 'Grok 4.5'])
   assert.equal(models[0].description, 'frontier')
 
   const g46 = await adapter.resolveModel('grok', 'grok-4.6')
@@ -629,10 +665,6 @@ test('grok discovery merges CLI-catalog reasoning metadata by model id', async (
   const g45 = await adapter.resolveModel('grok', 'grok-4.5')
   assert.deepEqual(g45.reasoning?.efforts.map(effort => effort.id), ['high', 'medium', 'low'])
 
-  // A model the CLI catalog does not cover exposes no efforts.
-  const build = await adapter.resolveModel('grok', 'grok-build-0.1')
-  assert.equal(build.reasoning, undefined)
-  assert.equal(build.context?.contextWindow, 256_000)
 })
 
 test('grok discovery survives a CLI catalog failure with a warning', async () => {
@@ -646,7 +678,7 @@ test('grok discovery survives a CLI catalog failure with a warning', async () =>
     onWarn: message => warnings.push(message),
   })
   const models = await adapter.listModels('grok')
-  assert.deepEqual(models.map(model => model.id), ['grok-4.6', 'grok-4.5', 'grok-build-0.1'])
+  assert.deepEqual(models.map(model => model.id), ['grok-4.6', 'grok-4.5'])
   assert.equal(warnings.length, 1)
   assert.match(warnings[0], /CLI catalog fetch failed/)
   assert.equal((await adapter.resolveModel('grok', 'grok-4.6')).reasoning, undefined)
@@ -770,6 +802,50 @@ function memoryCatalogStore(initial?: CatalogSnapshot): CatalogPersistence & {
 function settle(): Promise<void> {
   return new Promise(resolve => setImmediate(resolve))
 }
+
+test('grok filters unsupported models from a fresh persisted catalog', async () => {
+  const store = memoryCatalogStore({
+    at: Date.now(),
+    models: [
+      { id: 'grok-build-0.1', name: 'Grok Build' },
+      { id: 'grok-4.5', name: 'Grok 4.5' },
+    ],
+  })
+  const adapter = new GrokAdapter({
+    models: STATIC_GROK,
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens(grokSession),
+    discovery: true,
+    fetchFn: () => Promise.reject(new Error('fresh persisted catalog must not fetch')),
+    catalogStore: store,
+  })
+  assert.deepEqual((await adapter.listModels('grok')).map(model => model.id), ['grok-4.5'])
+})
+
+test('grok invalidates an unsupported persisted catalog and falls back to the picker allowlist', async () => {
+  const store = memoryCatalogStore({
+    at: Date.now(),
+    models: [{ id: 'grok-build-0.1', name: 'Grok Build' }],
+  })
+  const adapter = new GrokAdapter({
+    models: [
+      { id: 'grok-4.6', name: 'Grok 4.6' },
+      { id: 'grok-4.5', name: 'Grok 4.5' },
+    ],
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens(grokSession),
+    discovery: true,
+    fetchFn: () => Promise.reject(new Error('fresh persisted catalog must not fetch')),
+    catalogStore: store,
+  })
+
+  assert.deepEqual(
+    (await adapter.listModels('grok')).map(model => model.id),
+    ['grok-4.6', 'grok-4.5'],
+  )
+  await settle()
+  assert.equal(store.saved(), undefined)
+})
 
 test('ModelCatalogCache serves the last-known catalog while a refresh runs or fails', async () => {
   // ttlMs 0 makes every entry instantly stale, so each resolve exercises the
@@ -930,7 +1006,7 @@ test('grok listModels retries a 401 after a forced refresh before invalidating',
     catalogStore: store,
   })
   const models = await adapter.listModels('grok')
-  assert.deepEqual(models.map(model => model.id), ['grok-4.6', 'grok-4.5', 'grok-build-0.1'])
+  assert.deepEqual(models.map(model => model.id), ['grok-4.6', 'grok-4.5'])
   assert.equal(modelsCalls, 2)
   await settle()
   assert.notEqual(store.saved(), undefined)
@@ -965,7 +1041,7 @@ test('grok listModels invalidates the catalog after a 401 that survives forced r
     catalogStore: store,
   })
   const models = await adapter.listModels('grok')
-  assert.deepEqual(models.map(model => model.id), ['grok-4'])
+  assert.deepEqual(models.map(model => model.id), ['grok-4.6'])
   await settle()
   assert.equal(store.saved(), undefined)
 })

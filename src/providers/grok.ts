@@ -62,6 +62,24 @@ const GROK_DEFAULT_MAX_TOKENS = 32_000
 /** Refresh when the access token has less than this much life left. */
 export const GROK_PREEMPT_MS = 2 * 60_000
 
+/** Grok subscription models exposed in the customer model picker. */
+export const GROK_PICKER_MODELS: readonly ModelEntry[] = [
+  { id: 'grok-4.6', name: 'Grok 4.6' },
+  { id: 'grok-4.5', name: 'Grok 4.5' },
+]
+const GROK_PICKER_MODEL_IDS = new Set(GROK_PICKER_MODELS.map(model => model.id))
+
+/** Keep only the supported customer Grok models in every picker catalog source. */
+function pickerModels<Model extends { id: string }>(models: readonly Model[]): Model[] {
+  return models.filter(model => GROK_PICKER_MODEL_IDS.has(model.id))
+}
+
+/** Reject restored or crafted selections outside the customer Grok allowlist. */
+function assertPickerModel(provider: string, model: string): void {
+  if (GROK_PICKER_MODEL_IDS.has(model)) return
+  throw new LlmError(`grok provider "${provider}" does not expose model "${model}"`, 'UNKNOWN_MODEL')
+}
+
 /** Body fields xAI uses to name a delay or reset. */
 const GROK_RESET_FIELDS = ['retry_after', 'retry_after_seconds', 'resets_at', 'reset_at'] as const
 
@@ -480,16 +498,6 @@ export async function fetchGrokCliCatalog(
 }
 
 /**
- * The /v1/models list also serves generation models that cannot chat
- * (grok-imagine-image*, grok-imagine-video*) and embedding models; the picker
- * must not offer them. Heuristic over the id substring, verified against the
- * live catalog (grok-build-0.1 and the grok-4 family pass).
- */
-function isChatModel(id: string): boolean {
-  return !/imagine|image-|video|embed/i.test(id)
-}
-
-/**
  * CLI-contributed fields carried forward from a previously discovered model.
  * @param prior - the last-known entry for this id, if any.
  * @returns enrichment to apply when the live CLI catalog cannot contribute.
@@ -518,7 +526,7 @@ function grokPriorMeta(prior: DiscoveredModel | undefined): GrokCliModelMeta {
  * @param previous - last-known catalog used to keep enrichment when the CLI
  *   catalog is down or omits a model.
  * @param signal - caller cancellation (pool-assembly timeout).
- * @returns discovered chat models in endpoint order.
+ * @returns supported customer models in endpoint order.
  */
 export async function fetchGrokModels(
   session: GrokSession,
@@ -554,7 +562,7 @@ export async function fetchGrokModels(
   const discovered: DiscoveredModel[] = []
   for (const entry of payload.data) {
     if (typeof entry.id !== 'string' || entry.id.length === 0 || seen.has(entry.id)) continue
-    if (!isChatModel(entry.id)) continue
+    if (!GROK_PICKER_MODEL_IDS.has(entry.id)) continue
     seen.add(entry.id)
     const cli = cliCatalog?.get(entry.id)
     discovered.push({
@@ -676,7 +684,7 @@ export class GrokAdapter extends LlmAdapter {
   }
 
   private staticModels(provider: string): LlmModelInfo[] {
-    return this.options.models.map(model => ({
+    return pickerModels(this.options.models).map(model => ({
       provider,
       id: model.id,
       name: model.name ?? model.id,
@@ -691,7 +699,7 @@ export class GrokAdapter extends LlmAdapter {
     const extra = await pool.modelsForProvider(provider as ProviderId)
     const seen = new Set(own.map(model => model.id))
     // Account pools reuse the catalog row; only configured tiers are extra.
-    return [...own, ...extra.filter(model => !seen.has(model.id))]
+    return pickerModels([...own, ...extra.filter(model => !seen.has(model.id))])
   }
 
   /** The provider's own catalog: union of every account, or one account when named. */
@@ -714,11 +722,20 @@ export class GrokAdapter extends LlmAdapter {
       // The fetcher runs only on a cache miss, and resolves the session
       // through the refresh-aware path so an expired access token renews here
       // instead of failing discovery into the static fallback.
-      return this.listed(provider, await discoverOrRetryAuth(
+      const discovered = await discoverOrRetryAuth(
         force => this.options.tokens.session(account, force),
         catalog,
         () => catalog.get(() => this.fetchCatalog(account, signal)),
-      ))
+      )
+      const current = pickerModels(discovered)
+      if (current.length === 0) {
+        catalog.invalidate()
+        this.options.onWarn?.(
+          'grok cached catalog has no supported Grok 4.6 or Grok 4.5 models; using the built-in catalog',
+        )
+        return this.staticModels(provider)
+      }
+      return this.listed(provider, current)
     } catch (error: unknown) {
       if (isDiscoveryAborted(error, signal)) throw error
       // A permanent refresh failure deletes the stored session: the provider
@@ -750,6 +767,7 @@ export class GrokAdapter extends LlmAdapter {
   }
 
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    assertPickerModel(provider, model)
     const pool = this.options.pool?.()
     if (pool !== undefined && await pool.owns(provider as ProviderId, model)) {
       return pool.resolveModel(provider, model)
@@ -780,6 +798,7 @@ export class GrokAdapter extends LlmAdapter {
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    assertPickerModel(options.provider, options.model)
     const pool = this.options.pool?.()
     if (pool !== undefined && await pool.owns(options.provider as ProviderId, options.model)) {
       yield* pool.stream(options)

@@ -42,12 +42,12 @@
 |----------|------------------|------|
 | `codex`  | ChatGPT Plus/Pro | 从实时目录提供 GPT-5.6 Sol、Terra、Luna |
 | `claude` | Claude Pro/Max   | 订阅内所有可用模型(Opus、Sonnet、Haiku、Fable —— 静态目录,随插件更新) |
-| `grok`   | X Premium (xAI)  | 从 `api.x.ai/v1/models` 实时获取(仅对话模型);推理等级来自 Grok CLI 目录(`cli-chat-proxy.grok.com/v1/models`) |
+| `grok`   | X Premium (xAI)  | 仅提供 Grok 4.6 和 Grok 4.5;实时推理等级来自 Grok CLI 目录(`cli-chat-proxy.grok.com/v1/models`) |
 | `copilot` | GitHub Copilot  | 从 `api.githubcopilot.com/models` 实时获取(两种 wire 的对话模型,含按模型的视觉标记与推理等级);登录使用 OAuth 设备码流程(在 `github.com/login/device` 输入页面显示的验证码) |
 
 只有已登录的 provider 才会出现在会话模型选择器里;登录/退出后列表自动刷新。支持视觉的模型会声明 `['text', 'image']` 输入模态,图片内容会被翻译成各 provider 的 wire 格式。
 
-ChatGPT 模型选择器只显示 GPT-5.6 Sol、Terra、Luna。实时目录、持久化缓存、配置覆盖、池分层和内置兜底中的旧模型都会被移除;Claude、Grok 和 Copilot 的模型目录不受影响。
+ChatGPT 模型选择器只显示 GPT-5.6 Sol、Terra、Luna,Grok 模型选择器只显示 Grok 4.6 和 Grok 4.5。实时目录、持久化缓存、配置覆盖、池分层和内置兜底中的其他条目都会被移除;恢复或伪造的不支持模型会在服务商请求前失败。Claude 和 Copilot 的模型目录不受影响。
 
 已登录的卡片还会显示**订阅用量**——按限额窗口(5 小时会话窗、每周窗,以及计划包含的按模型每周窗)展示已用百分比、进度条和重置时间,并带刷新按钮。Codex 用量来自 `chatgpt.com/backend-api/wham/usage`(同时报告计划类型),Claude 用量来自 `api.anthropic.com/api/oauth/usage`,Grok 用量来自 Grok Build CLI 代理的 `cli-chat-proxy.grok.com/v1/billing`(即 CLI `/usage` 面板的数据源,报告共享每周额度和订阅档位)。Copilot 没有用量接口,其卡片不显示用量区块。
 

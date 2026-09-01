@@ -91,6 +91,7 @@ import {
 import {
   GrokAdapter,
   grokFlow,
+  GROK_PICKER_MODELS,
   GROK_PREEMPT_MS,
   exchangeGrokCode,
   fetchGrokUsage,
@@ -214,11 +215,7 @@ const DEFAULT_MODELS: Record<ProviderId, ModelEntry[]> = {
     { id: 'claude-fable-5', name: 'Claude Fable 5', maxTokens: 128_000, contextWindow: 1_000_000 },
     { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5', maxTokens: 64_000 },
   ],
-  grok: [
-    { id: 'grok-4', name: 'Grok 4' },
-    { id: 'grok-4-fast-reasoning', name: 'Grok 4 Fast Reasoning' },
-    { id: 'grok-code-fast-1', name: 'Grok Code Fast 1' },
-  ],
+  grok: GROK_PICKER_MODELS.map(model => ({ ...model })),
   // Static fallback only: the live /models catalog (with per-model vision
   // flags and context windows) wins whenever discovery succeeds.
   copilot: [

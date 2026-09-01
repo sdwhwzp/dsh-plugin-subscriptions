@@ -81,7 +81,7 @@ const SessionId = (id: string): NonNullable<GenerateOptions['sessionId']> =>
 /** Minimal generate options for adapter.stream() calls. */
 const STREAM_OPTIONS: GenerateOptions = {
   provider: 'grok',
-  model: 'grok-4',
+  model: 'grok-4.6',
   messages: [{
     id: MessageId('m-stream'),
     role: 'user',
@@ -93,7 +93,7 @@ const STREAM_OPTIONS: GenerateOptions = {
 
 function grokAdapter(): GrokAdapter {
   return new GrokAdapter({
-    models: [{ id: 'grok-4', name: 'Grok 4' }],
+    models: [{ id: 'grok-4.6', name: 'Grok 4.6' }],
     streamIdleTimeoutMs: 1000,
     tokens: memoryTokens(grokSession),
     discovery: false,

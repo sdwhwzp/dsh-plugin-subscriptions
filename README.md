@@ -42,12 +42,12 @@ The `video_generate` tool plays the generated clip inline:
 |----------|-------------------|--------|
 | `codex`  | ChatGPT Plus/Pro  | GPT-5.6 Sol, Terra, and Luna from the live catalog |
 | `claude` | Claude Pro/Max    | all models available in your subscription (Opus, Sonnet, Haiku, Fable — static catalog, updated with the plugin) |
-| `grok`   | X Premium (xAI)   | live catalog from `api.x.ai/v1/models` (chat models only); reasoning efforts from the Grok CLI catalog (`cli-chat-proxy.grok.com/v1/models`) |
+| `grok`   | X Premium (xAI)   | Grok 4.6 and Grok 4.5; live reasoning metadata comes from the Grok CLI catalog (`cli-chat-proxy.grok.com/v1/models`) |
 | `copilot` | GitHub Copilot   | live catalog from `api.githubcopilot.com/models` (chat models on both wires, with per-model vision flags and reasoning efforts); login uses the OAuth device flow (enter the shown code at `github.com/login/device`) |
 
 Only logged-in providers appear in the session model picker; the lists above refresh on login/logout. Vision-capable models declare `['text', 'image']` input modalities, and image content is translated to each provider's wire format.
 
-The ChatGPT picker exposes only GPT-5.6 Sol, Terra, and Luna. Older entries are removed from live, persisted, configured, pool-tier, and fallback catalogs; Claude, Grok, and Copilot catalogs are unchanged.
+The ChatGPT picker exposes only GPT-5.6 Sol, Terra, and Luna. The Grok picker exposes only Grok 4.6 and Grok 4.5. Other entries are removed from live, persisted, configured, pool-tier, and fallback catalogs, and restored or crafted unsupported selections fail before provider I/O. Claude and Copilot catalogs are unchanged.
 
 Logged-in cards also show **subscription usage** — per rate-limit window (5-hour session, weekly, and per-model weekly where the plan has one) with the used percentage, a progress bar, and the reset time, plus a Refresh button. Codex usage comes from `chatgpt.com/backend-api/wham/usage` (also reports the plan), Claude usage from `api.anthropic.com/api/oauth/usage`, and Grok usage from the Grok Build CLI proxy's `cli-chat-proxy.grok.com/v1/billing` (the source of the CLI's `/usage` panel; reports the shared weekly pool and the subscription tier). Copilot exposes no usage endpoint, so its card shows no usage section.
 
