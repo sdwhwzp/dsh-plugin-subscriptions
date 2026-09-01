@@ -28,6 +28,7 @@ import type { CommandUiContract } from '@deepseek-ai/dsh-client-ui-commands/clie
 import { SubscriptionsSection } from './SubscriptionsSection.js'
 import type { SubscriptionsSectionInjected } from './SubscriptionsSection.js'
 import type { SubscriptionsAuthClient } from './SubscriptionsSection.js'
+import { resolveSubscriptionsAuthClient } from './subscriptions-auth-client.js'
 import { ImageGenerateToolview, createImageLoader } from './ImageGenerateToolview.js'
 import type { ImageGenerateToolviewInjected } from './ImageGenerateToolview.js'
 import { VideoGenerateToolview, createVideoLoader } from './VideoGenerateToolview.js'
@@ -67,7 +68,7 @@ export const inject = ['slots', 'remote', 'modelDirectories', 'locale']
  */
 export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
   const disposeRemote = await ctx.remote.$mount(subscriptionsAuthRemote)
-  const remote = (ctx.remote as unknown as { subscriptionsAuth: SubscriptionsAuthClient }).subscriptionsAuth
+  const remote: SubscriptionsAuthClient = await resolveSubscriptionsAuthClient(ctx)
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-plugin-subscriptions: copy dictionaries')
   // Settings-shell nudge: the panel (nav title + header row + section body)
   // sits flush against the panel's top edge; push it down a little to leave
