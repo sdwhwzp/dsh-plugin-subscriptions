@@ -132,7 +132,7 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
   // stays listed everywhere; `options` throws the friendly gate when the
   // session's current model is not a fast-capable codex model (the same
   // in-popup error posture the /model contribution uses for its guards).
-  ctx.inject(['commandUi'], (scope) => {
+  ctx.inject(['commandUi'], (scope: ClientContext) => {
     const command = scope.get('commandUi') as CommandUiContract
     scope.effect(() => command.register({
       name: 'fast',
