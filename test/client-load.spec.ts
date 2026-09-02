@@ -44,7 +44,7 @@ test('mounted subscriptions namespace is consumed through an exact nested inject
   await fiber.dispose()
 })
 
-test('package targets the Alpha.3 browser platform without client-runtime', async () => {
+test('package targets the Alpha.3-or-later browser platform without client-runtime', async () => {
   const manifest = JSON.parse(await readFile(new URL('../../package.json', import.meta.url), 'utf8')) as {
     dsh?: { engines?: { dsh?: string }; client?: { inject?: string[] } }
     devDependencies?: Record<string, string>

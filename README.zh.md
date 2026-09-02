@@ -219,10 +219,10 @@ tools+effort 的自动改道。
 
 ## 开发
 
-此版本要求 DeepSeek Harness `0.1.2-alpha.3` 或更高版本。浏览器端使用 Alpha.3 的 API Remotes 与 Client Store 平台模块，不再依赖已移除的 `dsh-client-runtime`；Host Remote 失败使用 Alpha.3 的带命名空间错误码。
+此版本要求 DeepSeek Harness `0.1.2-alpha.3` 或更高版本。浏览器端使用当前 API Remotes 与 Client Store 平台模块，不再依赖已移除的 `dsh-client-runtime`；Host Remote 失败使用带命名空间错误码。
 
 ```sh
-pnpm install   # devDependencies 通过 link: 指向相邻的 Alpha.3 deepseek-harness 检出
+pnpm install   # devDependencies 通过 link: 指向相邻的当前 deepseek-harness 检出
 pnpm build     # tsc(lib/)+ tsdown(lib/client.js 浏览器 bundle)
 pnpm test      # 编译后跑 node --test 单测
 ```
