@@ -221,15 +221,15 @@ tools+effort 的自动改道。
 
 ## 开发
 
-此版本要求 DeepSeek Harness `0.1.2-alpha.3` 或更高版本。浏览器端使用当前 API Remotes 与 Client Store 平台模块，不再依赖已移除的 `dsh-client-runtime`；Host Remote 失败使用带命名空间错误码。
+`0.6.4` 面向 DeepSeek Harness `0.1.3-alpha.1`，Harness peer 依赖声明为 `^0.1.3-alpha.1`。浏览器端使用当前 API Remotes 与 Client Store 平台模块，不再依赖已移除的 `dsh-client-runtime`；Host Remote 失败使用带命名空间错误码。
 
 ```sh
-pnpm install   # devDependencies 通过 link: 指向相邻的当前 deepseek-harness 检出
+pnpm install   # devDependencies 通过 link: 指向相邻的 deepseek-harness 0.1.3-alpha.1 检出
 pnpm build     # tsc(lib/)+ tsdown(lib/client.js 浏览器 bundle)
 pnpm test      # 编译后跑 node --test 单测
 ```
 
-`prepare`(git 安装时触发)执行 `tsdown.prepare.config.ts`:自包含打包两个面,所有 `@deepseek-ai/*` 依赖外部化 —— 运行时从 dsh 安装解析,保证不会引入第二份 cordis。
+`prepare` 执行 `pnpm run build`，与本地开发一样要求相邻的 Harness 检出。部署环境没有该检出时，应安装包含 `lib/` 的预构建 npm 包或发布 tarball。
 
 改了代码后 `pnpm build` 并重启 `dsh web` 生效。
 

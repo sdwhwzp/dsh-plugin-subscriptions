@@ -222,15 +222,15 @@ Changes apply immediately to subsequent requests — no restart needed. The OAut
 
 ## Develop
 
-This release requires DeepSeek Harness `0.1.2-alpha.3` or later. Its browser half uses the current API Remotes and Client Store platform modules instead of the removed `dsh-client-runtime`; Host Remote failures use the namespaced error vocabulary.
+Version `0.6.4` targets DeepSeek Harness `0.1.3-alpha.1`; its Harness peer dependencies use `^0.1.3-alpha.1`. Its browser half uses the current API Remotes and Client Store platform modules instead of the removed `dsh-client-runtime`; Host Remote failures use the namespaced error vocabulary.
 
 ```sh
-pnpm install   # devDependencies link to an adjacent current deepseek-harness checkout
+pnpm install   # devDependencies link to an adjacent deepseek-harness 0.1.3-alpha.1 checkout
 pnpm build     # tsc (lib/) + tsdown (lib/client.js browser bundle)
 pnpm test      # node --test over compiled unit specs
 ```
 
-`prepare` (used by git installs) runs `tsdown.prepare.config.ts`: a self-contained bundle build of both faces with all `@deepseek-ai/*` specifiers external — they resolve from the dsh installation at runtime, so this package never carries a second cordis copy.
+`prepare` runs `pnpm run build` and requires the same adjacent Harness checkout as local development. For a deployment without that checkout, install a prebuilt npm package or release tarball containing `lib/`.
 
 After `pnpm build`, restart `dsh web` to pick up changes.
 
