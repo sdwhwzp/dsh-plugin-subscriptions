@@ -28,7 +28,7 @@ export function imageCommandDefinition(): CommandDefinition {
   return {
     name: 'image',
     description: 'Generate an image from a text prompt',
-    input: { hint: '<prompt>', images: true },
+    input: { hint: '<prompt>', attachments: true },
     recordInput: false,
     handler: (invocation): CommandResult => {
       const prompt = invocation.rawInput.trim()
@@ -49,7 +49,7 @@ export function readImageCommandDefinition(): CommandDefinition {
   return {
     name: 'read-image',
     description: 'Read and analyze a workspace image',
-    input: { hint: '<image path>', images: true },
+    input: { hint: '<image path>', attachments: true },
     recordInput: false,
     handler: (invocation): CommandResult => {
       const input = invocation.rawInput.trim()

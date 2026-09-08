@@ -72,6 +72,7 @@ import { PoolUsageTracker } from './providers/pool-usage.js'
 import {
   CodexAdapter,
   codexFlow,
+  CODEX_PICKER_MODELS,
   CODEX_PREEMPT_MS,
   codexProfileClaims,
   exchangeCodexCode,
@@ -204,11 +205,7 @@ export const Config: z<Config> = z.object({
 
 /** Built-in catalogs used when the config does not override a provider's models. */
 const DEFAULT_MODELS: Record<ProviderId, ModelEntry[]> = {
-  codex: [
-    { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol' },
-    { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra' },
-    { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna' },
-  ],
+  codex: CODEX_PICKER_MODELS.map(model => ({ ...model })),
   claude: [
     { id: 'claude-opus-5', name: 'Claude Opus 5', maxTokens: 128_000, contextWindow: 1_000_000 },
     { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', maxTokens: 128_000, contextWindow: 1_000_000 },

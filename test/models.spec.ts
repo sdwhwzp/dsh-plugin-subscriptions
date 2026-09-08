@@ -9,7 +9,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { MessageId, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { Message } from '@deepseek-ai/dsh-llm'
-import { CodexAdapter, codexRequestBody, fetchCodexModels } from '../src/providers/codex.js'
+import { CODEX_CLIENT_VERSION, CodexAdapter, codexRequestBody, fetchCodexModels } from '../src/providers/codex.js'
 import { GrokAdapter } from '../src/providers/grok.js'
 import { ClaudeAdapter, claudeRequestBody } from '../src/providers/claude.js'
 import { CopilotAdapter, fetchCopilotModels } from '../src/providers/copilot.js'
@@ -193,6 +193,34 @@ test('codex discovery maps, filters hidden entries, and sorts by priority', asyn
   assert.equal(calls(), 1)
 })
 
+test('codex discovery resolves new models with their text-only, reasoning, and speed capabilities', async () => {
+  const { fetchFn, calls } = fakeFetch({
+    models: [{
+      slug: 'future-codex-model',
+      display_name: 'Future Codex Model',
+      visibility: 'list',
+      input_modalities: ['text'],
+      context_window: 128_000,
+      supported_reasoning_levels: [{ effort: 'low' }, { effort: 'high' }],
+      default_reasoning_level: 'low',
+      service_tiers: [{ id: 'priority' }],
+    }],
+  })
+  const adapter = codexAdapter({ session: codexSession, fetchFn })
+  const resolved = await adapter.resolveOwnModel('codex', 'future-codex-model')
+  assert.equal(resolved.name, 'Future Codex Model')
+  assert.equal(resolved.context?.contextWindow, 128_000)
+  assert.deepEqual(resolved.inputModalities, ['text'])
+  assert.deepEqual(resolved.reasoning?.efforts.map(effort => effort.id), ['low', 'high'])
+  assert.equal(resolved.reasoning?.defaultEffort, 'low')
+  assert.equal(await adapter.supportsFastTier('future-codex-model'), true)
+  assert.deepEqual(await adapter.fastCapableModels(), ['future-codex-model'])
+  const models = await adapter.listModels('codex')
+  assert.deepEqual(models.map(model => model.id), ['future-codex-model'])
+  assert.deepEqual(models[0].inputModalities, ['text'])
+  assert.equal(calls(), 1)
+})
+
 test('resolveModel prefers discovered context window and reasoning efforts', async () => {
   const { fetchFn } = fakeFetch(CODEX_MODELS_PAYLOAD)
   const adapter = codexAdapter({ session: codexSession, fetchFn })
@@ -301,6 +329,23 @@ test('codex config override wins over discovery entirely', async () => {
   assert.equal(calls(), 0)
 })
 
+test('codex manual catalogs retain models outside the built-in fallback', async () => {
+  const { fetchFn, calls } = fakeFetch(CODEX_MODELS_PAYLOAD)
+  const adapter = new CodexAdapter({
+    models: [{ id: 'custom-codex', name: 'Custom Codex', inputModalities: ['text'], contextWindow: 64_000 }],
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens(codexSession),
+    discovery: false,
+    fetchFn,
+  })
+  assert.deepEqual((await adapter.listModels('codex')).map(model => model.id), ['custom-codex'])
+  const resolved = await adapter.resolveModel('codex', 'custom-codex')
+  assert.equal(resolved.name, 'Custom Codex')
+  assert.equal(resolved.context?.contextWindow, 64_000)
+  assert.deepEqual(resolved.inputModalities, ['text'])
+  assert.equal(calls(), 0)
+})
+
 test('grok discovery keeps only Grok 4.6 and Grok 4.5', async () => {
   const { fetchFn } = fakeFetch({
     data: [
@@ -367,6 +412,41 @@ test('fetchCodexModels tolerates entries without visibility or priority', async 
     models: [{ slug: 'gpt-5.6-sol', display_name: 'Sol' }],
   }).fetchFn)
   assert.deepEqual(models, [{ id: 'gpt-5.6-sol', name: 'Sol' }])
+})
+
+test('fetchCodexModels excludes newer client requirements and tolerates unrecognized versions', async () => {
+  const [major, minor, patch] = CODEX_CLIENT_VERSION.split('.').map(Number)
+  const entries = [
+    { slug: 'same-version', minimal_client_version: CODEX_CLIENT_VERSION },
+    { slug: 'short-version', minimal_client_version: `${major}.${minor}` },
+    { slug: 'padded-version', minimal_client_version: `${CODEX_CLIENT_VERSION}.0` },
+    { slug: 'older-version', minimal_client_version: '0.0.0' },
+    { slug: 'missing-version' },
+    { slug: 'null-version', minimal_client_version: null },
+    { slug: 'invalid-version', minimal_client_version: '999bad.0.0' },
+    { slug: 'newer-patch', minimal_client_version: `${major}.${minor}.${patch + 1}` },
+    { slug: 'newer-minor', minimal_client_version: `${major}.${minor + 1}.0` },
+    { slug: 'newer-major', minimal_client_version: `${major + 1}.0.0` },
+  ]
+  const models = await fetchCodexModels(codexSession, fakeFetch({ models: entries }).fetchFn)
+  assert.deepEqual(models.map(model => model.id), entries.slice(0, 7).map(entry => entry.slug))
+})
+
+test('fetchCodexModels excludes inputs the harness cannot represent without claiming vision support', async () => {
+  const models = await fetchCodexModels(codexSession, fakeFetch({
+    models: [
+      { slug: 'text-only', input_modalities: ['text'] },
+      { slug: 'vision', input_modalities: ['image', 'text', 'image', 'audio'] },
+      { slug: 'unspecified' },
+      { slug: 'audio-only', input_modalities: ['audio'] },
+      { slug: 'no-inputs', input_modalities: [] },
+    ],
+  }).fetchFn)
+  assert.deepEqual(models, [
+    { id: 'text-only', name: 'text-only', inputModalities: ['text'] },
+    { id: 'vision', name: 'vision', inputModalities: ['text', 'image'] },
+    { id: 'unspecified', name: 'unspecified' },
+  ])
 })
 
 test('codex discovery flags models whose catalog advertises a fast service tier', async () => {
@@ -802,6 +882,38 @@ function memoryCatalogStore(initial?: CatalogSnapshot): CatalogPersistence & {
 function settle(): Promise<void> {
   return new Promise(resolve => setImmediate(resolve))
 }
+
+test('codex persisted catalogs retain new models and their capabilities without a fetch', async () => {
+  const store = memoryCatalogStore({
+    at: Date.now(),
+    models: [{
+      id: 'persisted-codex-model',
+      name: 'Persisted Model',
+      inputModalities: ['text'],
+      reasoning: { efforts: [{ id: ReasoningEffortId('low'), name: 'Low' }], defaultEffort: ReasoningEffortId('low') },
+      fastTier: true,
+    }],
+  })
+  let calls = 0
+  const adapter = new CodexAdapter({
+    models: STATIC_CODEX,
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens(codexSession),
+    discovery: true,
+    fetchFn: () => {
+      calls++
+      return Promise.reject(new Error('unexpected catalog fetch'))
+    },
+    catalogStore: store,
+  })
+  assert.deepEqual((await adapter.listModels('codex')).map(model => model.id), ['persisted-codex-model'])
+  const resolved = await adapter.resolveModel('codex', 'persisted-codex-model')
+  assert.deepEqual(resolved.inputModalities, ['text'])
+  assert.equal(resolved.reasoning?.defaultEffort, 'low')
+  assert.equal(await adapter.supportsFastTier('persisted-codex-model'), true)
+  assert.deepEqual(await adapter.fastCapableModels(), ['persisted-codex-model'])
+  assert.equal(calls, 0)
+})
 
 test('grok filters unsupported models from a fresh persisted catalog', async () => {
   const store = memoryCatalogStore({
@@ -1285,7 +1397,7 @@ test('a member adapter keeps catalog rows and delegates pooled / extra ids', asy
     pool: () => fakePool as never,
   })
   const models = await adapter.listModels('codex')
-  assert.deepEqual(models.map(model => model.id), ['gpt-5.6-sol'])
+  assert.deepEqual(models.map(model => model.id), ['gpt-5.6-sol', 'smart'])
   const resolved = await adapter.resolveModel('codex', 'gpt-5.6-sol')
   assert.equal(resolved.context?.contextWindow, 1000)
   const chunks: { type: string }[] = []
@@ -1376,6 +1488,9 @@ test('listModels orders the account union by catalog priority', async () => {
     'gpt-5.6-sol',
     'gpt-5.6-terra',
     'gpt-5.6-luna',
+    'gpt-5.5',
+    'gpt-5.4',
+    'gpt-5.4-mini',
   ])
 })
 

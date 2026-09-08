@@ -66,18 +66,15 @@ const CODEX_DEFAULT_MAX_TOKENS = 128_000
 /** Refresh when the access token has less than this much life left. */
 export const CODEX_PREEMPT_MS = 5 * 60_000
 
-/** ChatGPT subscription models exposed to customer accounts. */
+/**
+ * Built-in catalog used when live discovery fails and no catalog was configured.
+ * Successful discovery lists the account's visible, client-compatible models.
+ */
 export const CODEX_PICKER_MODELS: readonly ModelEntry[] = [
   { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol' },
   { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra' },
   { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna' },
 ]
-const CODEX_PICKER_MODEL_IDS = new Set(CODEX_PICKER_MODELS.map(model => model.id))
-
-/** Keep only the current ChatGPT subscription models in every catalog source. */
-function pickerModels<Model extends { id: string }>(models: readonly Model[]): Model[] {
-  return models.filter(model => CODEX_PICKER_MODEL_IDS.has(model.id))
-}
 
 /**
  * Body fields the backend uses to name a reset. A window-exhaustion rejection
@@ -119,7 +116,7 @@ const CODEX_EFFORTS = [
   { id: ReasoningEffortId('xhigh'), name: 'Extra High' },
 ] as const
 const CODEX_DEFAULT_EFFORT = ReasoningEffortId('high')
-/** Every gpt-5.x codex model accepts image input. */
+/** Modalities assumed when a catalog entry declares no `input_modalities`. */
 const CODEX_MODALITIES: readonly ('text' | 'image')[] = ['text', 'image']
 
 /**
@@ -420,6 +417,36 @@ interface CodexWireModel {
   additional_speed_tiers?: string[]
   visibility?: string
   priority?: number
+  input_modalities?: string[]
+  minimal_client_version?: string | null
+}
+
+/**
+ * Compare a catalog entry's minimum client version with CODEX_CLIENT_VERSION.
+ * Missing or unrecognized requirements leave the entry eligible for discovery.
+ */
+function meetsClientVersion(required: string | null | undefined): boolean {
+  if (typeof required !== 'string' || required.length === 0) return true
+  const parse = (value: string): number[] | undefined => {
+    if (!/^\d+(?:\.\d+)*$/.test(value)) return undefined
+    const parts = value.split('.').map(Number)
+    return parts.every(Number.isSafeInteger) ? parts : undefined
+  }
+  const want = parse(required)
+  const have = parse(CODEX_CLIENT_VERSION)
+  if (want === undefined || have === undefined) return true
+  for (let index = 0; index < Math.max(want.length, have.length); index++) {
+    const left = have[index] ?? 0
+    const right = want[index] ?? 0
+    if (left !== right) return left > right
+  }
+  return true
+}
+
+/** Supported input modalities; undefined means the catalog omitted this field. */
+function entryModalities(entry: CodexWireModel): ('text' | 'image')[] | undefined {
+  if (!Array.isArray(entry.input_modalities)) return undefined
+  return CODEX_MODALITIES.filter(modality => entry.input_modalities?.includes(modality))
 }
 
 /**
@@ -437,7 +464,7 @@ function supportsFastTier(entry: CodexWireModel): boolean {
  * @param session - the stored session (used as-is; never refreshed here).
  * @param fetchFn - fetch implementation (injectable for tests).
  * @param signal - caller cancellation (pool-assembly timeout).
- * @returns current picker models: old and hidden entries dropped, sorted by priority.
+ * @returns visible, client-compatible models with supported inputs, sorted by priority.
  */
 export async function fetchCodexModels(
   session: CodexSession,
@@ -461,10 +488,11 @@ export async function fetchCodexModels(
   const discovered: DiscoveredModel[] = []
   for (const entry of payload.models) {
     if (typeof entry.slug !== 'string' || entry.slug.length === 0) continue
-    if (!CODEX_PICKER_MODEL_IDS.has(entry.slug)) continue
-    // codex-rs ModelVisibility: only "list" is picker-visible; hide/none are
-    // dropped, and an absent or unknown value is included (in doubt, include).
+    // Missing or unknown visibility retains the entry; hide/none exclude it.
     if (entry.visibility === 'hide' || entry.visibility === 'none') continue
+    if (!meetsClientVersion(entry.minimal_client_version)) continue
+    const modalities = entryModalities(entry)
+    if (modalities?.length === 0) continue
     const efforts = (entry.supported_reasoning_levels ?? [])
       .filter(level => typeof level.effort === 'string' && level.effort.length > 0)
       .map(level => ({
@@ -493,6 +521,7 @@ export async function fetchCodexModels(
         ? { reasoning: { efforts, ...defaultEffort === undefined ? {} : { defaultEffort } } }
         : {},
       ...supportsFastTier(entry) ? { fastTier: true } : {},
+      ...modalities === undefined ? {} : { inputModalities: modalities },
     }
     discovered.push(model)
   }
@@ -682,7 +711,7 @@ export class CodexAdapter extends LlmAdapter {
   }
 
   private staticModels(provider: string): LlmModelInfo[] {
-    return pickerModels(this.options.models).map(model => ({
+    return this.options.models.map(model => ({
       provider,
       id: model.id,
       name: model.name ?? model.id,
@@ -697,7 +726,7 @@ export class CodexAdapter extends LlmAdapter {
     const extra = await pool.modelsForProvider(provider as ProviderId)
     const seen = new Set(own.map(model => model.id))
     // Account pools reuse the catalog row; only configured tiers are extra.
-    return pickerModels([...own, ...extra.filter(model => !seen.has(model.id))])
+    return [...own, ...extra.filter(model => !seen.has(model.id))]
   }
 
   /** The provider's own catalog: union of every account, or one account when named. */
@@ -725,18 +754,17 @@ export class CodexAdapter extends LlmAdapter {
         catalog,
         () => catalog.get(() => this.fetchCatalog(account, signal)),
       )
-      const current = pickerModels(discovered)
-      if (current.length === 0) {
+      if (discovered.length === 0) {
         catalog.invalidate()
-        this.options.onWarn?.('codex cached catalog has no picker-visible GPT-5.6 models; using the built-in catalog')
+        this.options.onWarn?.('codex catalog listed no picker-visible model; using the built-in catalog')
         return this.staticModels(provider)
       }
-      return current.map(model => ({
+      return discovered.map(model => ({
         provider,
         id: model.id,
         name: model.name,
         ...model.description === undefined ? {} : { description: model.description },
-        inputModalities: CODEX_MODALITIES,
+        inputModalities: model.inputModalities ?? CODEX_MODALITIES,
         ...model.priority === undefined ? {} : { priority: model.priority },
       } as LlmModelInfo))
     } catch (error: unknown) {
@@ -761,7 +789,7 @@ export class CodexAdapter extends LlmAdapter {
    * call — just because the TTL lapsed mid-turn.
    */
   private async discovered(model: string): Promise<DiscoveredModel | undefined> {
-    if (!this.options.discovery || !CODEX_PICKER_MODEL_IDS.has(model)) return undefined
+    if (!this.options.discovery) return undefined
     const accounts = (await this.options.tokens.list()).map(entry => entry.key)
     return discoverAcrossAccounts(accounts, async account => {
       const catalog = await this.catalogFor(account)
@@ -789,7 +817,7 @@ export class CodexAdapter extends LlmAdapter {
       try {
         const catalog = await this.catalogFor(account)
         const models = await catalog.resolve(() => this.fetchCatalog(account))
-        for (const model of pickerModels(models ?? [])) {
+        for (const model of models ?? []) {
           if (model.fastTier !== true || seen.has(model.id)) continue
           seen.add(model.id)
           ids.push(model.id)
@@ -830,7 +858,7 @@ export class CodexAdapter extends LlmAdapter {
       id: model,
       name: discovered?.name ?? configured?.name ?? model,
       ...discovered?.description === undefined ? {} : { description: discovered.description },
-      inputModalities: configured?.inputModalities ?? CODEX_MODALITIES,
+      inputModalities: discovered?.inputModalities ?? configured?.inputModalities ?? CODEX_MODALITIES,
       context: { contextWindow: discovered?.contextWindow ?? configured?.contextWindow ?? CODEX_CONTEXT_WINDOW },
       defaultMaxTokens: configured?.maxTokens ?? CODEX_DEFAULT_MAX_TOKENS,
       ...(reasoning === undefined ? {} : { reasoning }),
