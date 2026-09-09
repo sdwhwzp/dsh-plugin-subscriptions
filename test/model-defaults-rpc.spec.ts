@@ -13,8 +13,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
-import { prepareTestRemote, type TestRemoteHandler } from './remote-helper.js'
+import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
+import type { RpcResult } from '../src/compat.js'
 
 const HOME = mkdtempSync(join(tmpdir(), 'model-defaults-rpc-test-'))
 
@@ -24,6 +24,7 @@ const { modelDefaultsFilePath, resetModelDefaultsForTests } = await import('../s
 interface FakeLlm {
   registered: string[]
   replaced: string[]
+  catalogClears: number
 }
 
 /**
@@ -35,14 +36,14 @@ interface FakeLlm {
  * of them. Each mount also resets the store and deletes the file, so the cases
  * below are independent — they used to pass only in their written order.
  */
-async function mount(options: { tier?: string } = {}): Promise<{ handler: TestRemoteHandler; fake: FakeLlm }> {
+async function mount(options: { tier?: string } = {}): Promise<{ handler: ConnectionRpcHandler; fake: FakeLlm }> {
   process.env.DSH_HOME = HOME
   assert.ok(modelDefaultsFilePath().startsWith(HOME), 'the store resolves inside this spec\'s temp home')
   await resetModelDefaultsForTests()
   rmSync(modelDefaultsFilePath(), { force: true })
-  const fake: FakeLlm = { registered: [], replaced: [] }
+  let handler: ConnectionRpcHandler | undefined
+  const fake: FakeLlm = { registered: [], replaced: [], catalogClears: 0 }
   const ctx = new Context()
-  const handler = prepareTestRemote(ctx)
   const listed = [{ id: 'gpt-5.6-sol', name: 'GPT-5.6-Sol' }]
   // A configured tier appears in the picker catalog the same way the pool
   // contributes it, so the settings catalog has to recognise and skip it.
@@ -62,7 +63,9 @@ async function mount(options: { tier?: string } = {}): Promise<{ handler: TestRe
         defaultEffort: ReasoningEffortId('low'),
       },
     }),
-    registerAdapter: (providers: string[]) => {
+    registerAdapter: (providers: string[], adapter: { clearAccountCatalog(): void }) => {
+      const clear = adapter.clearAccountCatalog.bind(adapter)
+      adapter.clearAccountCatalog = () => { fake.catalogClears++; clear() }
       fake.registered.push(...providers)
       return Object.assign(() => {}, {
         replace: (next: string[]) => { fake.replaced.push(...next) },
@@ -70,6 +73,17 @@ async function mount(options: { tier?: string } = {}): Promise<{ handler: TestRe
     },
   }
   ctx.provide('llm', fakeLlm)
+  ctx.provide('connection', {
+    rpc: {
+      // This plugin owns a prefix on the shared authenticated channel, so the
+      // stub records the interceptor and re-adds the prefix the tests omit.
+      intercept: (_channel: string, _matches: (endpoint: string) => boolean, h: ConnectionRpcHandler) => {
+        handler = ((endpoint, payload, signal, principal) =>
+          h(`subscriptions-auth/${endpoint}`, payload, signal, principal)) as ConnectionRpcHandler
+        return () => Promise.resolve()
+      },
+    },
+  })
   ctx.plugin(plugin, {
     providers: ['codex'],
     ...options.tier === undefined ? {} : {
@@ -77,15 +91,16 @@ async function mount(options: { tier?: string } = {}): Promise<{ handler: TestRe
     },
   })
   await new Promise(resolve => setTimeout(resolve, 50))
+  assert.ok(handler !== undefined, 'the shared-channel subscriptions-auth interceptor was registered')
   return { handler, fake }
 }
 
 async function call(
-  handler: TestRemoteHandler,
+  handler: ConnectionRpcHandler,
   endpoint: string,
   payload: unknown,
-): Promise<RemoteResult<unknown>> {
-  return handler(endpoint, payload, new AbortController().signal)
+): Promise<RpcResult<unknown>> {
+  return handler(endpoint, payload, new AbortController().signal, undefined)
 }
 
 test('modelDefaults serves the listed models with their advertised efforts', async () => {
@@ -101,6 +116,19 @@ test('modelDefaults serves the listed models with their advertised efforts', asy
     name: 'GPT-5.6-Sol',
     efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }],
   })
+})
+
+test('modelDefaults refresh validates force and re-announces the picker only on explicit refresh', async () => {
+  const { handler, fake } = await mount()
+  await call(handler, 'modelDefaults', {})
+  await call(handler, 'modelDefaults', { force: false })
+  assert.deepEqual(fake.replaced, [])
+  assert.equal(fake.catalogClears, 0)
+  assert.equal((await call(handler, 'modelDefaults', { force: 'true' })).ok, false)
+  assert.deepEqual(fake.replaced, [])
+  assert.equal((await call(handler, 'modelDefaults', { force: true })).ok, true)
+  assert.deepEqual(fake.replaced, ['codex'])
+  assert.equal(fake.catalogClears, 1)
 })
 
 test('setModelDefault persists and the next modelDefaults reports it', async () => {

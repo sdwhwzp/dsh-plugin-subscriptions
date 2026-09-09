@@ -5,7 +5,6 @@
  * state machine ({@link ResponsesStreamTranslator}) so tests need no streams.
  */
 
-import { createHash } from 'node:crypto'
 import {
   CONTEXT_WINDOW_EXCEEDED_CODE,
   EMPTY_RESPONSE_CODE,
@@ -19,11 +18,11 @@ import type {
   ContentBlock,
   StreamChunk,
   TokenUsage,
-  ToolResultBlock,
   ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import { parseSse } from './sse.js'
-import type { TranslatableMessage } from './resolved.js'
+import { withToolResultImages } from './resolved.js'
+import type { ResolvedToolResultBlock, TranslatableMessage } from './resolved.js'
 
 /** Assembled `instructions` + `input` pair for one Responses request. */
 export interface ResponsesRequestInput {
@@ -31,39 +30,6 @@ export interface ResponsesRequestInput {
   instructions?: string
   /** Responses `input` items in conversation order. */
   input: Record<string, unknown>[]
-}
-
-const RESPONSES_CALL_ID_MAX_LENGTH = 64
-const RESPONSES_MAPPED_CALL_ID_PREFIX = 'dsh_'
-
-/** Hash one harness call id into a short Responses-safe identifier. */
-function mappedResponsesCallId(callId: string, attempt: number): string {
-  const hash = createHash('sha256')
-  if (attempt > 0) hash.update(`${attempt}\0`)
-  hash.update(callId)
-  return `${RESPONSES_MAPPED_CALL_ID_PREFIX}${hash.digest('base64url')}`
-}
-
-/** Build one request-scoped, collision-safe Responses call-id mapper. */
-function createResponsesCallIdMapper(): (callId: string) => string {
-  const mappedByOriginal = new Map<string, string>()
-  const originalByMapped = new Map<string, string>()
-  return (callId: string): string => {
-    const existing = mappedByOriginal.get(callId)
-    if (existing !== undefined) return existing
-
-    let attempt = 0
-    let mapped = callId.length <= RESPONSES_CALL_ID_MAX_LENGTH
-      ? callId
-      : mappedResponsesCallId(callId, attempt)
-    while (originalByMapped.has(mapped) && originalByMapped.get(mapped) !== callId) {
-      attempt += 1
-      mapped = mappedResponsesCallId(callId, attempt)
-    }
-    mappedByOriginal.set(callId, mapped)
-    originalByMapped.set(mapped, callId)
-    return mapped
-  }
 }
 
 /**
@@ -89,7 +55,7 @@ export interface ReasoningReplayItem {
 }
 
 /** Flatten a tool result's content to plain text for `function_call_output`. */
-function toolResultText(block: ToolResultBlock): string {
+function toolResultText(block: ResolvedToolResultBlock): string {
   return block.content.map(part => (part.type === 'text' ? part.text : '')).join('')
 }
 
@@ -118,13 +84,12 @@ export function toResponsesInput(
 ): ResponsesRequestInput {
   const input: Record<string, unknown>[] = []
   const systemTexts: string[] = []
-  const mapCallId = createResponsesCallIdMapper()
   // [2026-08-23]-[reasoning models lose their chain of thought across a tool
   // round trip unless the completed reasoning items ride back in; dedupe by
   // ARRAY REFERENCE so parallel calls of one response (which share one array
   // instance) replay the items once, before the first of them]
   let lastReplay: readonly ReasoningReplayItem[] | undefined
-  for (const message of messages) {
+  for (const message of withToolResultImages(messages)) {
     if (message.role === 'system') {
       for (const block of message.content) {
         if (block.type === 'text') systemTexts.push(block.text)
@@ -160,7 +125,7 @@ export function toResponsesInput(
           }
           input.push({
             type: 'function_call',
-            call_id: mapCallId(String(block.id)),
+            call_id: String(block.id),
             name: block.name,
             arguments: block.arguments,
           })
@@ -170,7 +135,7 @@ export function toResponsesInput(
           flushMessage()
           input.push({
             type: 'function_call_output',
-            call_id: mapCallId(String(block.toolCallId)),
+            call_id: String(block.toolCallId),
             output: toolResultText(block),
           })
           break
@@ -198,15 +163,25 @@ export function toResponsesInput(
 
 /**
  * Map harness tool schemas to Responses function tools.
+ *
+ * OpenAI Responses may normalize schemas into strict mode when `strict` is
+ * omitted. Codex and Copilot opt out to preserve harness optional parameters;
+ * this does not prevent a model from voluntarily supplying optional fields.
+ * Other providers keep their existing defaults unless explicitly opted out.
  * @param tools - tool schemas from the request.
+ * @param options - provider-specific opt-out from strict schema normalization.
  * @returns Responses `tools` array entries.
  */
-export function toResponsesTools(tools: readonly ToolSchema[]): Record<string, unknown>[] {
+export function toResponsesTools(
+  tools: readonly ToolSchema[],
+  options: { strict?: false } = {},
+): Record<string, unknown>[] {
   return tools.map(tool => ({
     type: 'function',
     name: tool.name,
     description: tool.description,
     parameters: tool.parameters,
+    ...options.strict === undefined ? {} : { strict: options.strict },
   }))
 }
 

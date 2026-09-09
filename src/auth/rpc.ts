@@ -5,19 +5,28 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type {} from '@deepseek-ai/dsh-api-gateway/types'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
-import type { AuthenticatedPrincipal } from '@deepseek-ai/dsh-llm'
-import { Remote, RemoteError, TypertRemoteService, remoteErrorOf } from '@deepseek-ai/dsh-typert-protocol'
-import type { RemoteFailure } from '@deepseek-ai/dsh-typert-protocol'
-import type { SubscriptionJsonValue } from '../wire.js'
 import { PROVIDER_IDS, type ProviderId } from './store.js'
 import type { ProviderUsage } from '../providers/common.js'
+import type { RpcResult } from '../compat.js'
+import type { AuthenticatedPrincipal } from '@deepseek-ai/dsh-llm'
+import type { HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
 import type { ProxyConfigView, ProxyDraft, ProxyInput, ProxyTestResult } from '../http.js'
 
 /** API Gateway namespace generated for the browser client. */
 export const SUBSCRIPTIONS_AUTH_NAMESPACE = 'subscriptionsAuth'
+
+/**
+ * The shared authenticated channel these endpoints ride. Upstream registers a
+ * channel of its own; a multi-account gateway forwards a fixed prefix list, so
+ * only the shared `/api` channel reaches the Host at all, and only it carries
+ * the caller's verified principal.
+ */
+export const SUBSCRIPTIONS_AUTH_CHANNEL = '/api'
+
+/** Endpoint prefix this plugin owns on the shared channel. */
+export const SUBSCRIPTIONS_AUTH_PREFIX = 'subscriptions-auth/'
 
 /** Media types the attachment store accepts (ImageMediaType). */
 const IMAGE_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] as const
@@ -114,9 +123,14 @@ export interface ModelDefaultsCatalog {
 }
 
 /** Default-effort picker operations behind the `modelDefaults/setModelDefault` endpoints. */
+export interface ProviderSettingsController {
+  get(provider: ProviderId, force: boolean): Promise<unknown>
+  set(provider: ProviderId, settings: unknown): Promise<void>
+}
+
 export interface ModelDefaultsController {
   /** Per-provider picker state for the Settings page. */
-  catalog(): Promise<ModelDefaultsCatalog[]>
+  catalog(force?: boolean): Promise<ModelDefaultsCatalog[]>
   /** Set one model's configured default effort; undefined clears the override. */
   set(provider: ProviderId, model: string, effort: string | undefined): Promise<void>
 }
@@ -181,21 +195,22 @@ export class BadRequest extends Error {}
 /** A subaccount may use assigned models but cannot inspect or mutate the owner's subscription. */
 class AdminForbidden extends Error {}
 
-function ok(value: unknown): SubscriptionJsonValue {
-  return value as SubscriptionJsonValue
+function ok(value: unknown): RpcResult<unknown> {
+  return { ok: true, value }
 }
 
-function failure(error: unknown): RemoteFailure {
-  const existing = remoteErrorOf(error)
-  if (existing !== undefined) return existing
+function failure(error: unknown): RpcResult<unknown> {
   const message = error instanceof Error ? error.message : String(error)
   if (error instanceof BadRequest) {
-    return new RemoteError('gateway/bad-request', message, { issues: [] })
+    // The issues array is zod-shaped upstream; this channel validates by hand.
+    return { ok: false, error: { code: 'bad-request', message, details: { issues: [] } } }
   }
   if (error instanceof AdminForbidden) {
-    return new RemoteError('subscriptions/admin-forbidden', message, {})
+    // A verified subaccount reached an owner-only operation: the caller is
+    // authenticated, so this is a refusal to act, not a malformed request.
+    return { ok: false, error: { code: 'admin-forbidden', message, details: {} } }
   }
-  return new RemoteError('gateway/internal', message, {})
+  return { ok: false, error: { code: 'internal', message, details: {} } }
 }
 
 /** Whether this verified caller may inspect provider-level subscription quota. */
@@ -328,7 +343,7 @@ function readVideoName(payload: unknown): string {
   return name
 }
 
-/** Validate the `usage` endpoint's optional force flag. */
+/** Validate the usage/model catalog endpoints' optional force flag. */
 function readForce(payload: unknown): boolean {
   if (typeof payload !== 'object' || payload === null) return false
   const force = (payload as Record<string, unknown>).force
@@ -430,8 +445,18 @@ async function dispatch(
   payload: unknown,
   signal: AbortSignal,
   principal: AuthenticatedPrincipal | undefined,
-): Promise<SubscriptionJsonValue> {
+  providerSettings?: ProviderSettingsController,
+): Promise<RpcResult<unknown>> {
   switch (endpoint) {
+    case 'providerSettings':
+      if (!providerSettings) throw new BadRequest('provider settings are unavailable')
+      return ok(await providerSettings.get(readProvider(payload), readForce(payload)))
+    case 'setProviderSettings': {
+      if (!providerSettings) throw new BadRequest('provider settings are unavailable')
+      const provider = readProvider(payload)
+      await providerSettings.set(provider, (payload as Record<string, unknown>).settings)
+      return ok({ ok: true })
+    }
     case 'status': {
       const entries = await Promise.all(PROVIDER_IDS.map(
         async provider => [provider, statusForCaller(await controller.status(provider), principal)] as const,
@@ -495,10 +520,11 @@ async function dispatch(
       assertCanManageCredentials(principal)
       if (proxy === undefined) throw new BadRequest('proxy configuration is unavailable')
       return ok(await proxy.test(readProxyTestPayload(payload)))
-    case 'modelDefaults':
+    case 'modelDefaults': {
       assertCanManageCredentials(principal)
       if (modelDefaults === undefined) throw new BadRequest('model defaults are unavailable')
-      return ok(await modelDefaults.catalog())
+      return ok(await modelDefaults.catalog(readForce(payload)))
+    }
     case 'setModelDefault':
       assertCanManageCredentials(principal)
       if (modelDefaults === undefined) throw new BadRequest('model defaults are unavailable')
@@ -512,66 +538,6 @@ async function dispatch(
   }
 }
 
-declare module '@deepseek-ai/cordis' {
-  interface Context {
-    /** Host owner of the subscription-auth Remote namespace. */
-    subscriptionsAuth: SubscriptionsAuthRemote
-  }
-}
-
-/** Dependencies retained by the Host Remote service for its process lifetime. */
-export interface SubscriptionsAuthRemoteOptions {
-  /** Provider OAuth and account operations. */
-  readonly controller: AuthController
-  /** Per-session Codex speed selection. */
-  readonly speed: SpeedController
-  /** Optional proxy configuration. */
-  readonly proxy?: ProxyConfigController
-  /** Optional per-model effort defaults. */
-  readonly modelDefaults?: ModelDefaultsController
-}
-
-/** Host service backing the generated `ctx.remote.subscriptionsAuth` namespace. */
-export class SubscriptionsAuthRemote extends TypertRemoteService {
-  /**
-   * @param ctx - Host context carrying API Gateway when the web profile is mounted.
-   * @param options - auth, speed, proxy, and effort operations.
-   */
-  constructor(ctx: Context, private readonly options: SubscriptionsAuthRemoteOptions) {
-    super(ctx, 'subscriptionsAuth', { namespace: SUBSCRIPTIONS_AUTH_NAMESPACE })
-  }
-
-  /**
-   * Execute one validated subscription action through API Gateway.
-   * @param action - action name owned by this plugin.
-   * @param payload - lossless JSON action payload.
-   * @param signal - caller cancellation for provider I/O and attachment reads.
-   * @returns the action-specific lossless JSON value.
-   * @throws RemoteError for validation, authorization, or provider failures.
-   */
-  @Remote('execute')
-  async execute(
-    action: string,
-    payload: SubscriptionJsonValue,
-    signal: AbortSignal,
-  ): Promise<SubscriptionJsonValue> {
-    try {
-      return await dispatch(
-        this.options.controller,
-        this.options.speed,
-        this.options.proxy,
-        this.options.modelDefaults,
-        action,
-        payload,
-        signal,
-        this.ctx.get('typertGateway')?.currentPrincipal(),
-      )
-    } catch (error: unknown) {
-      throw failure(error)
-    }
-  }
-}
-
 /**
  * Register the subscription-auth Remote service when the Typert registry exists.
  * @param ctx - plugin context; minimal profiles without Typert remain usable.
@@ -580,19 +546,48 @@ export class SubscriptionsAuthRemote extends TypertRemoteService {
  * @param proxy - optional proxy-config controller backing `proxyGet`/`proxySet`/`proxyTest`.
  * @param modelDefaults - optional per-model default-effort state backing `modelDefaults`/`setModelDefault`.
  */
-export function registerAuthRemote(
+export function registerAuthRpc(
   ctx: Context,
   controller: AuthController,
   speed: SpeedController,
   proxy: ProxyConfigController | undefined = undefined,
   modelDefaults: ModelDefaultsController | undefined = undefined,
+  providerSettings: ProviderSettingsController | undefined = undefined,
 ): void {
-  ctx.inject(['typert'], (remoteCtx) => {
-    new SubscriptionsAuthRemote(remoteCtx, {
-      controller,
-      speed,
-      ...proxy === undefined ? {} : { proxy },
-      ...modelDefaults === undefined ? {} : { modelDefaults },
-    })
+  // `connection` is not in this plugin's inject list (headless compositions
+  // lack it), so its startup order is unconstrained: defer registration until
+  // the service exists instead of probing once at apply time.
+  ctx.inject(['connection'], (ctx) => {
+    const connection = ctx.get('connection') as HostConnectionHandle
+    ctx.effect(
+      // These endpoints ride the shared authenticated `/api` channel rather than
+      // a channel of their own: a multi-account gateway forwards a fixed prefix
+      // list, so a private channel is unreachable, and `loopback` authority on
+      // one would admit every signed-in account to the owner's credentials.
+      // Interception keeps the caller's verified principal on every dispatch.
+      () => connection.rpc.intercept(
+        SUBSCRIPTIONS_AUTH_CHANNEL,
+        endpoint => endpoint.startsWith(SUBSCRIPTIONS_AUTH_PREFIX)
+          && endpoint.length > SUBSCRIPTIONS_AUTH_PREFIX.length,
+        async (endpoint, payload, signal, principal) => {
+          try {
+            return await dispatch(
+              controller,
+              speed,
+              proxy,
+              modelDefaults,
+              endpoint.slice(SUBSCRIPTIONS_AUTH_PREFIX.length),
+              payload,
+              signal,
+              principal,
+              providerSettings,
+            )
+          } catch (error) {
+            return failure(error)
+          }
+        },
+      ),
+      'dsh-plugin-subscriptions: /api/subscriptions-auth/* rpc endpoints',
+    )
   })
 }

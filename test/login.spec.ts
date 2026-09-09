@@ -18,7 +18,8 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
+import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
+import type { RpcResult } from '../src/compat.js'
 
 import * as plugin from '../src/index.js'
 import { SubscriptionsAuthController } from '../src/index.js'
@@ -30,7 +31,6 @@ import {
 } from '../src/providers/claude.js'
 import { accountKeyOf, authFilePath, listAccounts } from '../src/auth/store.js'
 import type { ClaudeSession } from '../src/auth/store.js'
-import { prepareTestRemote, type TestRemoteHandler } from './remote-helper.js'
 
 const TEMP_DIRS: string[] = []
 
@@ -479,12 +479,24 @@ test('claude: an import and a logout fired together settle in call order', async
 // ---------------------------------------------------------------------------
 
 /** Mount the plugin with a fake llm/connection host; return the RPC handler. */
-async function mountPlugin(): Promise<TestRemoteHandler> {
+async function mountPlugin(): Promise<ConnectionRpcHandler> {
+  let handler: ConnectionRpcHandler | undefined
   const ctx = new Context()
-  const handler = prepareTestRemote(ctx)
   ctx.provide('llm', { registerAdapter: () => Object.assign(() => {}, { replace: () => {} }) })
+  ctx.provide('connection', {
+    rpc: {
+      // This plugin owns a prefix on the shared authenticated channel, so the
+      // stub records the interceptor and re-adds the prefix the tests omit.
+      intercept: (_channel: string, _matches: (endpoint: string) => boolean, h: ConnectionRpcHandler) => {
+        handler = ((endpoint, payload, signal, principal) =>
+          h(`subscriptions-auth/${endpoint}`, payload, signal, principal)) as ConnectionRpcHandler
+        return () => Promise.resolve()
+      },
+    },
+  })
   ctx.plugin(plugin, { providers: ['codex'] })
   await new Promise(resolve => setTimeout(resolve, 50))
+  assert.ok(handler !== undefined, 'the shared-channel subscriptions-auth interceptor was registered')
   return handler
 }
 
@@ -495,7 +507,7 @@ function signal(): AbortSignal {
 interface StatusValue { providers: Record<string, { accounts: unknown[]; busy: boolean }> }
 
 /** Unwrap a successful RPC result, failing the test with its error otherwise. */
-function okValue<T>(result: RemoteResult<unknown>, what: string): T {
+function okValue<T>(result: RpcResult<unknown>, what: string): T {
   assert.ok(result.ok, `${what}: ${result.ok ? '' : result.error.message}`)
   return result.value as T
 }
@@ -533,13 +545,15 @@ test('auth RPC: an unknown provider is rejected, not dispatched', async () => {
     const handler = await mountPlugin()
     const result = await handler('login', { provider: 'gemini' }, signal())
     assert.equal(result.ok, false)
-    if (!result.ok) assert.equal(result.error.code, 'gateway/bad-request')
+    if (!result.ok) assert.equal(result.error.code, 'bad-request')
   })
 })
 
-test('auth RPC: subaccounts cannot change provider credentials', async () => {
+test('auth RPC: a subaccount cannot change provider credentials', async () => {
   await inIsolatedHome(async () => {
     const handler = await mountPlugin()
+    // A gateway deployment authenticates every caller on the shared channel, so
+    // refusing here is what keeps one account out of another's provider login.
     const child = { source: 'dsh-passwords', id: '2', username: 'child', role: 'user' } as const
     const requests = [
       ['login', { provider: 'codex' }],
@@ -549,10 +563,10 @@ test('auth RPC: subaccounts cannot change provider credentials', async () => {
     ] as const
 
     for (const [endpoint, payload] of requests) {
-      const result = await handler(`subscriptions-auth/${endpoint}`, payload, signal(), child)
+      const result = await handler(endpoint, payload, signal(), child)
       assert.equal(result.ok, false, endpoint)
       if (!result.ok) {
-        assert.equal(result.error.code, 'subscriptions/admin-forbidden', endpoint)
+        assert.equal(result.error.code, 'admin-forbidden', endpoint)
         assert.match(result.error.message, /only to administrators$/, endpoint)
       }
     }

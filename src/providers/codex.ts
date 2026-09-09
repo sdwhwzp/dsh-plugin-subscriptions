@@ -23,6 +23,7 @@ import { resolveImages } from '../translate/resolved.js'
 import { streamResponses, toResponsesInput, toResponsesTools } from '../translate/responses.js'
 import type { ResponsesRequestInput } from '../translate/responses.js'
 import {
+  deterministicSessionId,
   effortDisplayName,
   httpLlmError,
   idleWatchdog,
@@ -67,16 +68,6 @@ const CODEX_DEFAULT_MAX_TOKENS = 128_000
 export const CODEX_PREEMPT_MS = 5 * 60_000
 
 /**
- * Built-in catalog used when live discovery fails and no catalog was configured.
- * Successful discovery lists the account's visible, client-compatible models.
- */
-export const CODEX_PICKER_MODELS: readonly ModelEntry[] = [
-  { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol' },
-  { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra' },
-  { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna' },
-]
-
-/**
  * Body fields the backend uses to name a reset. A window-exhaustion rejection
  * carries `usage_limit_reached` with the seconds left on the window — the case
  * that used to classify as a terminal quota and never be retried at all.
@@ -116,7 +107,7 @@ const CODEX_EFFORTS = [
   { id: ReasoningEffortId('xhigh'), name: 'Extra High' },
 ] as const
 const CODEX_DEFAULT_EFFORT = ReasoningEffortId('high')
-/** Modalities assumed when a catalog entry declares no `input_modalities`. */
+/** Every gpt-5.x codex model accepts image input. */
 const CODEX_MODALITIES: readonly ('text' | 'image')[] = ['text', 'image']
 
 /**
@@ -399,11 +390,19 @@ export const CODEX_MODELS_URL = 'https://chatgpt.com/backend-api/codex/models'
 
 /**
  * Client version sent on the /models catalog request. The backend gates the
- * visible model list by client version: versions below ~0.101 get an empty
- * list, while current codex CLI releases get the full catalog — keep this in
- * the range of current codex CLI releases.
+ * visible model list by client version. Verified 2026-09-05: the same account
+ * omitted GPT-6 Astra at 0.147.0 and listed it at stable CLI 0.153.4. This is
+ * not an entitlement guarantee; the server remains authoritative.
  */
-export const CODEX_CLIENT_VERSION = '0.147.0'
+export const CODEX_CLIENT_VERSION = '0.153.4'
+
+/** Validate an explicit catalog compatibility version before using it on the wire. */
+export function codexClientVersion(value = CODEX_CLIENT_VERSION): string {
+  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$/.test(value)) {
+    throw new Error('codexClientVersion must be a version such as 0.153.4')
+  }
+  return value
+}
 
 /** The codex `/models` entry shape this plugin reads (subset of codex-rs `ModelInfo`). */
 interface CodexWireModel {
@@ -411,42 +410,13 @@ interface CodexWireModel {
   display_name?: string
   description?: string | null
   context_window?: number | null
+  max_context_window?: number | null
   supported_reasoning_levels?: { effort?: string; description?: string }[]
   default_reasoning_level?: string | null
   service_tiers?: { id?: string; name?: string; description?: string }[]
   additional_speed_tiers?: string[]
   visibility?: string
   priority?: number
-  input_modalities?: string[]
-  minimal_client_version?: string | null
-}
-
-/**
- * Compare a catalog entry's minimum client version with CODEX_CLIENT_VERSION.
- * Missing or unrecognized requirements leave the entry eligible for discovery.
- */
-function meetsClientVersion(required: string | null | undefined): boolean {
-  if (typeof required !== 'string' || required.length === 0) return true
-  const parse = (value: string): number[] | undefined => {
-    if (!/^\d+(?:\.\d+)*$/.test(value)) return undefined
-    const parts = value.split('.').map(Number)
-    return parts.every(Number.isSafeInteger) ? parts : undefined
-  }
-  const want = parse(required)
-  const have = parse(CODEX_CLIENT_VERSION)
-  if (want === undefined || have === undefined) return true
-  for (let index = 0; index < Math.max(want.length, have.length); index++) {
-    const left = have[index] ?? 0
-    const right = want[index] ?? 0
-    if (left !== right) return left > right
-  }
-  return true
-}
-
-/** Supported input modalities; undefined means the catalog omitted this field. */
-function entryModalities(entry: CodexWireModel): ('text' | 'image')[] | undefined {
-  if (!Array.isArray(entry.input_modalities)) return undefined
-  return CODEX_MODALITIES.filter(modality => entry.input_modalities?.includes(modality))
 }
 
 /**
@@ -464,14 +434,17 @@ function supportsFastTier(entry: CodexWireModel): boolean {
  * @param session - the stored session (used as-is; never refreshed here).
  * @param fetchFn - fetch implementation (injectable for tests).
  * @param signal - caller cancellation (pool-assembly timeout).
- * @returns visible, client-compatible models with supported inputs, sorted by priority.
+ * @param clientVersion - catalog compatibility version, not the plugin version.
+ * @returns discovered models: hidden entries dropped, sorted by priority.
  */
 export async function fetchCodexModels(
   session: CodexSession,
   fetchFn: FetchFn = proxiedFetch,
   signal?: AbortSignal,
+  clientVersion = CODEX_CLIENT_VERSION,
 ): Promise<DiscoveredModel[]> {
-  const url = `${CODEX_MODELS_URL}?client_version=${CODEX_CLIENT_VERSION}`
+  const version = codexClientVersion(clientVersion)
+  const url = `${CODEX_MODELS_URL}?client_version=${encodeURIComponent(version)}`
   const response = await fetchFn(url, {
     headers: {
       'authorization': `Bearer ${session.accessToken}`,
@@ -488,11 +461,9 @@ export async function fetchCodexModels(
   const discovered: DiscoveredModel[] = []
   for (const entry of payload.models) {
     if (typeof entry.slug !== 'string' || entry.slug.length === 0) continue
-    // Missing or unknown visibility retains the entry; hide/none exclude it.
+    // codex-rs ModelVisibility: only "list" is picker-visible; hide/none are
+    // dropped, and an absent or unknown value is included (in doubt, include).
     if (entry.visibility === 'hide' || entry.visibility === 'none') continue
-    if (!meetsClientVersion(entry.minimal_client_version)) continue
-    const modalities = entryModalities(entry)
-    if (modalities?.length === 0) continue
     const efforts = (entry.supported_reasoning_levels ?? [])
       .filter(level => typeof level.effort === 'string' && level.effort.length > 0)
       .map(level => ({
@@ -516,12 +487,14 @@ export async function fetchCodexModels(
       ...typeof entry.context_window === 'number' && entry.context_window > 0
         ? { contextWindow: entry.context_window }
         : {},
+      ...Number.isSafeInteger(entry.max_context_window) && entry.max_context_window! > 0
+        ? { maxContextWindow: entry.max_context_window! }
+        : {},
       ...typeof entry.priority === 'number' ? { priority: entry.priority } : {},
       ...efforts.length > 0
         ? { reasoning: { efforts, ...defaultEffort === undefined ? {} : { defaultEffort } } }
         : {},
       ...supportsFastTier(entry) ? { fastTier: true } : {},
-      ...modalities === undefined ? {} : { inputModalities: modalities },
     }
     discovered.push(model)
   }
@@ -530,13 +503,17 @@ export async function fetchCodexModels(
   // client_version too old): surface it as a discovery failure so the adapter
   // falls back to the static catalog instead of vanishing from the picker.
   if (discovered.length === 0) {
-    throw new Error(`codex models endpoint returned an empty catalog (client_version ${CODEX_CLIENT_VERSION})`)
+    throw new Error(`codex models endpoint returned an empty catalog (client_version ${version})`)
   }
   return discovered
 }
 
 /** Constructor dependencies for {@link CodexAdapter}. */
 export interface CodexAdapterOptions {
+  /** Catalog compatibility version; defaults to the verified stable CLI version. */
+  clientVersion?: string
+  /** Automatic lookup used only when no explicit compatibility version is set. */
+  resolveClientVersion?: () => Promise<string>
   models: readonly ModelEntry[]
   streamIdleTimeoutMs: number
   tokens: AccountTokenManager<CodexSession>
@@ -562,6 +539,7 @@ export interface CodexAdapterOptions {
    * the provider's own default.
    */
   defaultEffortOf?: (model: string) => string | undefined
+  contextWindowOf?: (model: string) => number | undefined
   /**
    * Per-request speed lookup (the composer Speed toggle's host half). Returns
    * whether this session's current choice sends the model on the fast tier;
@@ -620,6 +598,41 @@ function normalizeCodexCallIds(input: ResponsesRequestInput['input']): Responses
   })
 }
 
+/** Text marking a repaired tool output as an unknown outcome; the model must verify before retrying. */
+export const CODEX_UNKNOWN_TOOL_OUTCOME = 'The tool call has no recorded result. Its outcome is unknown; verify external state before retrying any operation that may have side effects.'
+
+/**
+ * Reconcile one Responses input's tool-call pairing after id normalization:
+ * every `function_call` gets an output and every `function_call_output`
+ * matches a call. Missing outputs become error-style outputs whose text marks
+ * the outcome unknown; orphan outputs are dropped. Duplicate calls of one id
+ * receive exactly one repair output. The request is local repair only: the
+ * durable history stays authoritative and unchanged.
+ * @param input - normalized Responses input items.
+ * @returns the same array when already balanced, otherwise a repaired array.
+ */
+export function reconcileResponsesToolCalls(input: ResponsesRequestInput['input']): ResponsesRequestInput['input'] {
+  const calls = new Set<string>()
+  const outputs = new Set<string>()
+  for (const item of input) {
+    if (item.type === 'function_call' && typeof item.call_id === 'string') calls.add(item.call_id)
+    else if (item.type === 'function_call_output' && typeof item.call_id === 'string') outputs.add(item.call_id)
+  }
+  const missing = new Set([...calls].filter(callId => !outputs.has(callId)))
+  if (missing.size === 0 && [...outputs].every(callId => calls.has(callId))) return input
+  const balanced: ResponsesRequestInput['input'] = []
+  for (const item of input) {
+    if (item.type === 'function_call_output' && (typeof item.call_id !== 'string' || !calls.has(item.call_id))) {
+      continue
+    }
+    balanced.push(item)
+    if (item.type === 'function_call' && typeof item.call_id === 'string' && missing.delete(item.call_id)) {
+      balanced.push({ type: 'function_call_output', call_id: item.call_id, output: CODEX_UNKNOWN_TOOL_OUTCOME })
+    }
+  }
+  return balanced
+}
+
 /**
  * The Responses request body for one generation. A fast-tier request (the
  * composer Speed toggle, the codex CLI's fast mode) carries
@@ -634,12 +647,13 @@ export function codexRequestBody(
   return {
     model: options.model,
     instructions: resolved.instructions ?? DEFAULT_CODEX_INSTRUCTIONS,
-    input: normalizeCodexCallIds(resolved.input),
+    input: reconcileResponsesToolCalls(normalizeCodexCallIds(resolved.input)),
+    // Omit tool controls for tool-less requests, matching the other adapters.
+    // This is request-shape consistency, not a claim that Codex rejects the
+    // controls when no tools are supplied.
     ...options.tools !== undefined && options.tools.length > 0
-      ? { tools: toResponsesTools(options.tools) }
+      ? { tools: toResponsesTools(options.tools, { strict: false }), tool_choice: 'auto', parallel_tool_calls: true }
       : {},
-    tool_choice: 'auto',
-    parallel_tool_calls: true,
     ...options.reasoningEffort !== undefined
       ? { reasoning: { effort: String(options.reasoningEffort), summary: 'auto' } }
       : {},
@@ -661,12 +675,15 @@ export class CodexAdapter extends LlmAdapter {
 
   constructor(private readonly options: CodexAdapterOptions) {
     super()
+    codexClientVersion(options.clientVersion)
     this.catalog = new ModelCatalogCache(options.catalogStore)
   }
 
   /** Discovery fetcher: resolves the session through the refresh-aware path. */
   private async fetchCatalog(account?: string, signal?: AbortSignal): Promise<DiscoveredModel[]> {
-    return fetchCodexModels(await this.options.tokens.session(account), this.options.fetchFn, signal)
+    const version = this.options.clientVersion ?? await this.options.resolveClientVersion?.()
+    signal?.throwIfAborted()
+    return fetchCodexModels(await this.options.tokens.session(account), this.options.fetchFn, signal, version)
   }
 
   /** Drop cached catalogs after login/logout so the next list does not reuse a stale plan. */
@@ -754,17 +771,12 @@ export class CodexAdapter extends LlmAdapter {
         catalog,
         () => catalog.get(() => this.fetchCatalog(account, signal)),
       )
-      if (discovered.length === 0) {
-        catalog.invalidate()
-        this.options.onWarn?.('codex catalog listed no picker-visible model; using the built-in catalog')
-        return this.staticModels(provider)
-      }
       return discovered.map(model => ({
         provider,
         id: model.id,
         name: model.name,
         ...model.description === undefined ? {} : { description: model.description },
-        inputModalities: model.inputModalities ?? CODEX_MODALITIES,
+        inputModalities: CODEX_MODALITIES,
         ...model.priority === undefined ? {} : { priority: model.priority },
       } as LlmModelInfo))
     } catch (error: unknown) {
@@ -788,9 +800,11 @@ export class CodexAdapter extends LlmAdapter {
    * CODEX_EFFORTS list) selected by the user must not vanish — and fail the
    * call — just because the TTL lapsed mid-turn.
    */
-  private async discovered(model: string): Promise<DiscoveredModel | undefined> {
+  private async discovered(model: string, account?: string): Promise<DiscoveredModel | undefined> {
     if (!this.options.discovery) return undefined
-    const accounts = (await this.options.tokens.list()).map(entry => entry.key)
+    const accounts = account === undefined
+      ? (await this.options.tokens.list()).map(entry => entry.key)
+      : [account]
     return discoverAcrossAccounts(accounts, async account => {
       const catalog = await this.catalogFor(account)
       const models = await catalog.resolve(() => this.fetchCatalog(account))
@@ -838,11 +852,11 @@ export class CodexAdapter extends LlmAdapter {
   }
 
   /** Capability resolution of the provider's own models (the pool resolves members here). */
-  async resolveOwnModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+  async resolveOwnModel(provider: string, model: string, account?: string): Promise<LlmResolvedModelInfo> {
     // Discovered metadata (when discovery is on) wins over the static entry;
     // the static entry wins over the built-in defaults. A configured default
     // effort merges over both.
-    const discovered = await this.discovered(model)
+    const discovered = await this.discovered(model, account)
     const configured = this.options.models.find(entry => entry.id === model)
     // `extendable` only while falling back to the built-in list: that one is
     // known to trail the backend, so a configured level it omits still has to
@@ -858,11 +872,24 @@ export class CodexAdapter extends LlmAdapter {
       id: model,
       name: discovered?.name ?? configured?.name ?? model,
       ...discovered?.description === undefined ? {} : { description: discovered.description },
-      inputModalities: discovered?.inputModalities ?? configured?.inputModalities ?? CODEX_MODALITIES,
-      context: { contextWindow: discovered?.contextWindow ?? configured?.contextWindow ?? CODEX_CONTEXT_WINDOW },
+      inputModalities: configured?.inputModalities ?? CODEX_MODALITIES,
+      context: { contextWindow: await this.contextWindowFor(model, account) },
       defaultMaxTokens: configured?.maxTokens ?? CODEX_DEFAULT_MAX_TOKENS,
       ...(reasoning === undefined ? {} : { reasoning }),
     }
+  }
+
+  /** Account-specific bounds; absent maximum conservatively keeps the advertised default. */
+  async contextLimits(model: string, account?: string): Promise<{ default: number; max: number }> {
+    const discovered = await this.discovered(model, account)
+    const configured = this.options.models.find(entry => entry.id === model)
+    const fallback = discovered?.contextWindow ?? configured?.contextWindow ?? CODEX_CONTEXT_WINDOW
+    return { default: fallback, max: discovered?.maxContextWindow ?? fallback }
+  }
+
+  private async contextWindowFor(model: string, account?: string): Promise<number> {
+    const limits = await this.contextLimits(model, account)
+    return Math.min(this.options.contextWindowOf?.(model) ?? limits.default, limits.max)
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
@@ -917,7 +944,7 @@ export class CodexAdapter extends LlmAdapter {
         'authorization': `Bearer ${session.accessToken}`,
         'chatgpt-account-id': session.accountId,
         'originator': 'codex_cli_rs',
-        'session-id': randomUUID(),
+        'session-id': deterministicSessionId(options.sessionId),
         'accept': 'text/event-stream',
         'content-type': 'application/json',
         ...attributionHeaders(),

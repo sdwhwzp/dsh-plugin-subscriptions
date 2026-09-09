@@ -1,8 +1,9 @@
 /**
  * dsh-plugin-subscriptions: register OAuth-subscription LLM providers
- * (ChatGPT/Codex, Claude, Grok, GitHub Copilot) on `ctx.llm`, and expose the
- * authenticated `subscriptionsAuth` Remote namespace used by the web Settings
- * page. The token store lives at `~/.dsh/plugins/subscriptions/auth.json`.
+ * (ChatGPT/Codex, Claude, Grok, GitHub Copilot) on `ctx.llm`, and expose the `/subscriptions-auth`
+ * RPC channel the web Settings page uses to run the logins. The token store
+ * lives at `~/.dsh/plugins/subscriptions/auth.json`; the channel registers only when
+ * a host `connection` service exists, so headless compositions load fine.
  * @module dsh-plugin-subscriptions
  */
 
@@ -11,10 +12,10 @@ import z from '@deepseek-ai/schemastery'
 import { errorChain } from '@deepseek-ai/dsh-llm'
 import type {
   AdapterRegistrationHandle,
+  LlmAdapter,
+  LlmModelInfo,
   LlmResolvedModelInfo,
 } from '@deepseek-ai/dsh-llm'
-// Type-only: activates the `ctx.commands` Context merge for image commands.
-import type {} from '@deepseek-ai/dsh-commands'
 // Type-only: activates the `ctx.tools` Context merge for the inject block.
 import type {} from '@deepseek-ai/dsh-tools'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
@@ -23,7 +24,7 @@ import { DeviceFlowManager, type DeviceAttempt } from './auth/device-flow.js'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { readClaudeCodeCredentials, refreshClaudeSynced } from './auth/claude-code-creds.js'
-import { BadRequest, registerAuthRemote } from './auth/rpc.js'
+import { BadRequest, registerAuthRpc } from './auth/rpc.js'
 import type {
   AuthController,
   ImageBytesResult,
@@ -64,7 +65,9 @@ import type { AccountAwareAdapter } from './providers/accounts.js'
 import { DEFAULT_RATE_LIMIT_MAX_WAIT_MS, resolveRateLimitWait } from './providers/rate-limit.js'
 import type { RateLimitConfig } from './providers/rate-limit.js'
 import { catalogStore } from './providers/catalog-store.js'
+import { CodexClientVersionCache } from './providers/codex-client-version.js'
 import { PoolAdapter } from './providers/pool.js'
+import { ImageAccountPool } from './providers/image-pool.js'
 import { buildAccountPools, poolKey } from './providers/pool-family.js'
 import type { PoolDefinition, PoolMemberRef } from './providers/pool-family.js'
 import { PoolHealthRegistry } from './providers/pool-health.js'
@@ -72,7 +75,6 @@ import { PoolUsageTracker } from './providers/pool-usage.js'
 import {
   CodexAdapter,
   codexFlow,
-  CODEX_PICKER_MODELS,
   CODEX_PREEMPT_MS,
   codexProfileClaims,
   exchangeCodexCode,
@@ -92,7 +94,6 @@ import {
 import {
   GrokAdapter,
   grokFlow,
-  GROK_PICKER_MODELS,
   GROK_PREEMPT_MS,
   exchangeGrokCode,
   fetchGrokUsage,
@@ -112,11 +113,11 @@ import { createImageGenerateTool } from './tools/image-generate.js'
 import { createVideoGenerateTool, videosDirectory } from './tools/video-generate.js'
 import { proxiedFetch, proxyGetConfig, proxySetConfig, proxyTestConnection } from './http.js'
 import { applyImageCommands } from './image-commands.js'
+import { ProviderSettingsStore, PROVIDER_TOOLS, validatePreferences } from './provider-settings.js'
 
 export type { ModelEntry, ProviderUsage, UsageWindow } from './providers/common.js'
 export type { RateLimitConfig, RateLimitWait } from './providers/rate-limit.js'
 export type { ProviderStatus } from './auth/rpc.js'
-export { SubscriptionsAuthRemote } from './auth/rpc.js'
 export type { ClaudeSession, CodexSession, CopilotSession, GrokSession, ProviderId } from './auth/store.js'
 
 export const name = 'dsh-plugin-subscriptions'
@@ -131,6 +132,8 @@ export { withTimeout } from './providers/common.js'
 
 /** Plugin config, validated by the same-named schemastery schema. */
 export interface Config {
+  /** Codex /models client_version override; does not change account entitlements. */
+  codexClientVersion?: string
   /** Provider routes to register; defaults to all four. */
   providers?: ProviderId[]
   /** Maximum provider idle time while one stream read is outstanding (default five minutes). */
@@ -181,6 +184,7 @@ const poolMemberSchema: z<PoolMemberRef> = z.object({
 
 export const Config: z<Config> = z.object({
   providers: z.array(providerIdSchema).default(['codex', 'claude', 'grok', 'copilot']),
+  codexClientVersion: z.string(),
   streamIdleTimeoutMs: z.number().min(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   rateLimit: z.object({
     wait: z.boolean().default(true),
@@ -205,14 +209,22 @@ export const Config: z<Config> = z.object({
 
 /** Built-in catalogs used when the config does not override a provider's models. */
 const DEFAULT_MODELS: Record<ProviderId, ModelEntry[]> = {
-  codex: CODEX_PICKER_MODELS.map(model => ({ ...model })),
+  codex: [
+    { id: 'gpt-5.1-codex', name: 'GPT-5.1 Codex' },
+    { id: 'gpt-5.1-codex-mini', name: 'GPT-5.1 Codex Mini' },
+    { id: 'gpt-5.1', name: 'GPT-5.1' },
+  ],
   claude: [
     { id: 'claude-opus-5', name: 'Claude Opus 5', maxTokens: 128_000, contextWindow: 1_000_000 },
     { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', maxTokens: 128_000, contextWindow: 1_000_000 },
     { id: 'claude-fable-5', name: 'Claude Fable 5', maxTokens: 128_000, contextWindow: 1_000_000 },
     { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5', maxTokens: 64_000 },
   ],
-  grok: GROK_PICKER_MODELS.map(model => ({ ...model })),
+  grok: [
+    { id: 'grok-4', name: 'Grok 4' },
+    { id: 'grok-4-fast-reasoning', name: 'Grok 4 Fast Reasoning' },
+    { id: 'grok-code-fast-1', name: 'Grok Code Fast 1' },
+  ],
   // Static fallback only: the live /models catalog (with per-model vision
   // flags and context windows) wins whenever discovery succeeds.
   copilot: [
@@ -264,7 +276,7 @@ function planOf(provider: ProviderId, session: StoredSession): string | undefine
 type UsageFetchers = Partial<Record<ProviderId, (account: string, signal: AbortSignal) => Promise<ProviderUsage>>>
 
 /**
- * Auth operations behind the `subscriptionsAuth` Remote namespace: start/complete
+ * Auth operations behind the `/subscriptions-auth` RPC channel: start/complete
  * OAuth attempts in the background, feed pasted codes, cancel, log out, and
  * answer usage lookups.
  *
@@ -547,6 +559,8 @@ export class SubscriptionsAuthController implements AuthController {
 }
 
 export function apply(ctx: Context, config: Config): void {
+  const preferences = new ProviderSettingsStore()
+  const codexVersion = new CodexClientVersionCache()
   const providers = [...new Set(config.providers ?? [...PROVIDER_IDS])]
   const streamIdleTimeoutMs = config.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS
   if (!Number.isFinite(streamIdleTimeoutMs) || streamIdleTimeoutMs <= 0) {
@@ -585,7 +599,12 @@ export function apply(ctx: Context, config: Config): void {
   let poolHealth: PoolHealthRegistry | undefined
   let poolUsage: PoolUsageTracker | undefined
   let poolAdapter: PoolAdapter | undefined
+  const imagePool = new ImageAccountPool({
+    enabled: config.pool?.enabled !== false && (config.pool?.autoAccounts ?? config.pool?.autoFamilies ?? true),
+    onWarn,
+  })
   const authChanged = (provider: ProviderId, account?: string): void => {
+    if (provider === 'codex' || provider === 'grok') imagePool.clear(provider, account)
     // Login, logout, and credential death all pass through here; a copilot
     // auth transition also drops the adapter's captured reasoning replay
     // state (isolation is already account-scoped — this is memory hygiene).
@@ -637,6 +656,8 @@ export function apply(ctx: Context, config: Config): void {
           fetchCodexUsage(await tokens.session(account), proxiedFetch, signal)
         let adapter!: CodexAdapter
         adapter = new CodexAdapter({
+          ...config.codexClientVersion === undefined ? {} : { clientVersion: config.codexClientVersion },
+          resolveClientVersion: () => codexVersion.resolve(),
           models: catalog.codex,
           streamIdleTimeoutMs,
           rateLimit,
@@ -648,6 +669,7 @@ export function apply(ctx: Context, config: Config): void {
           // restarts, so a resumed session's selected effort keeps resolving.
           catalogStore: catalogStore('codex'),
           defaultEffortOf: (model: string) => defaultEffortOf('codex', model),
+          contextWindowOf: model => preferences.contextWindow(model),
           pool: () => poolAdapter,
           speedFor: (sessionId: string | undefined, model: string): boolean | Promise<boolean> =>
             sessionId !== undefined
@@ -844,6 +866,14 @@ export function apply(ctx: Context, config: Config): void {
     })
   }
 
+  // Keep the full catalog for the editor and routing; filter only picker enumeration.
+  const fullCatalogs = new Map<ProviderId, (provider: string) => Promise<readonly LlmModelInfo[]>>()
+  for (const [provider, adapter] of adapters) {
+    const list = adapter.listModels.bind(adapter)
+    fullCatalogs.set(provider, list)
+    adapter.listModels = async route => (await list(route)).filter(model => preferences.visible(provider, model.id))
+  }
+
   const speed: SpeedController = {
     async speed(sessionId) {
       return {
@@ -861,7 +891,15 @@ export function apply(ctx: Context, config: Config): void {
   // session model picker, so the offered effort levels match the picker
   // exactly, and the configured default merges in through the adapters.
   const modelDefaults: ModelDefaultsController = {
-    async catalog(): Promise<ModelDefaultsCatalog[]> {
+    async catalog(force = false): Promise<ModelDefaultsCatalog[]> {
+      if (force) {
+        codexVersion.invalidate()
+        // This is not an auth transition: retain health, usage and Copilot
+        // reasoning replay, but bypass every account's discovery cache.
+        for (const adapter of adapters.values()) adapter.clearAccountCatalog()
+        poolAdapter?.invalidate()
+        for (const [route, handle] of handles) handle.replace([route])
+      }
       const visible = new Set((await ctx.llm.listProviders()).map(provider => provider.id))
       const catalog: ModelDefaultsCatalog[] = []
       for (const provider of PROVIDER_IDS) {
@@ -933,13 +971,66 @@ export function apply(ctx: Context, config: Config): void {
       handles.get(provider)?.replace([provider])
     },
   }
-  registerAuthRemote(ctx, new SubscriptionsAuthController(
+  registerAuthRpc(ctx, new SubscriptionsAuthController(
     flows, deviceFlows, authChanged, resolveAttachments, usageFetchers, undefined, poolUsage,
   ), speed, {
     get: () => proxyGetConfig(),
     set: input => proxySetConfig(input),
     test: payload => proxyTestConnection(payload.url, payload.proxy),
-  }, modelDefaults)
+  }, modelDefaults, {
+    async get(provider, force) {
+      await loadModelDefaults()
+      const adapter = adapters.get(provider)
+      if (!adapter) throw new BadRequest(`provider ${provider} is not configured`)
+      if (force) {
+        if (provider === 'codex') codexVersion.invalidate()
+        adapter.clearAccountCatalog()
+        poolAdapter?.invalidate()
+        handles.get(provider)?.replace([provider])
+      }
+      const models = await fullCatalogs.get(provider)!(provider)
+      // Enumerate each account once, with the same bounds used by pool discovery.
+      const accounts = provider === 'codex' ? await codexTokens!.list() : []
+      const accountCatalogs = await Promise.all(accounts.map(async account => ({
+        account: account.key,
+        models: await withTimeout(signal => adapter.listOwnModels(provider, account.key, signal), DISCOVERY_TIMEOUT_MS).catch(() => undefined),
+      })))
+      const tierIds = new Set((await poolAdapter?.modelsForProvider(provider).catch(() => []) ?? []).map(model => model.id))
+      const rows = await Promise.all(models.map(async model => {
+        const contexts: { default: number; max: number }[] = []
+        if (provider === 'codex' && codexAdapter) {
+          for (const account of accountCatalogs) {
+            if (account.models?.some(entry => entry.id === model.id)) {
+              const limits = await codexAdapter.contextLimits(model.id, account.account).catch(() => undefined)
+              if (limits) contexts.push(limits)
+            }
+          }
+        }
+        // A model with unavailable capabilities can still be hidden or restored.
+        const info = await withTimeout(() => adapter.resolveModel(provider, model.id), DISCOVERY_TIMEOUT_MS).catch(() => undefined)
+        return {
+          id: model.id, name: model.name,
+          contextWindow: info?.context?.contextWindow,
+          efforts: tierIds.has(model.id) ? [] : info?.reasoning?.efforts.map(({ id, name }) => ({ id, name })) ?? [],
+          configured: defaultEffortOf(provider, model.id),
+          ...(contexts.length ? {
+            defaultContextWindow: Math.min(...contexts.map(entry => entry.default)),
+            maxContextWindow: Math.min(...contexts.map(entry => entry.max)),
+          } : {}),
+        }
+      }))
+      return { provider, settings: preferences.get(provider), models: rows, tools: PROVIDER_TOOLS[provider] }
+    },
+    async set(provider, settings) {
+      if (!adapters.has(provider)) throw new BadRequest(`provider ${provider} is not configured`)
+      let validated
+      try { validated = validatePreferences(provider, settings) } catch (error) {
+        throw new BadRequest(error instanceof Error ? error.message : String(error))
+      }
+      await preferences.set(provider, validated)
+      handles.get(provider)?.replace([provider])
+    },
+  })
 
   // Proactively keep keychain-bound Claude accounts synced with Claude Code's
   // own store (Keychain/file) every 5 minutes, so a session left idle between
@@ -966,21 +1057,40 @@ export function apply(ctx: Context, config: Config): void {
   // x_search and video_generate follow the grok provider; image_generate
   // prefers the codex provider and falls back to grok.
   ctx.inject(['tools'], (toolsCtx) => {
-    const imageGenerationAvailable = codexTokens !== undefined || grokTokens !== undefined
     if (grokTokens !== undefined) {
       toolsCtx.tools.register(createXSearchTool({ tokens: grokTokens }))
       toolsCtx.tools.register(createVideoGenerateTool({ tokens: grokTokens }))
     }
-    if (imageGenerationAvailable) {
+    if (codexTokens !== undefined || grokTokens !== undefined) {
       toolsCtx.tools.register(createImageGenerateTool({
+        imagePool,
         ...codexTokens === undefined ? {} : { codexTokens },
         ...grokTokens === undefined ? {} : { grokTokens },
         resolveAttachments,
         resolveLlm: () => ctx.get('llm'),
+        providerEnabled: (provider, createdAt) => preferences.toolEnabled(provider, 'image_generate', createdAt),
       }))
     }
+    // `/image` is this deployment's own command surface over the same tool.
     toolsCtx.inject(['commands'], (commandsCtx) => {
-      applyImageCommands(commandsCtx, { generate: imageGenerationAvailable })
+      applyImageCommands(commandsCtx, { generate: codexTokens !== undefined || grokTokens !== undefined })
+    })
+    // Restrictions are scoped to each agent. Keep global definitions registered
+    // so already-open sessions retain both their schemas and execution path.
+    toolsCtx.on('agent/created', ({ agent }) => {
+      const at = agent.session.header.createdAt
+      const deny: string[] = []
+      if (grokTokens !== undefined) {
+        for (const tool of ['x_search', 'video_generate'] as const) {
+          if (!preferences.toolEnabled('grok', tool, at)) deny.push(tool)
+        }
+      }
+      if ((codexTokens !== undefined || grokTokens !== undefined)
+        && !(codexTokens !== undefined && preferences.toolEnabled('codex', 'image_generate', at))
+        && !(grokTokens !== undefined && preferences.toolEnabled('grok', 'image_generate', at))) {
+        deny.push('image_generate')
+      }
+      if (deny.length) agent.ctx.tools.restrict({ deny })
     })
   })
 }

@@ -1,6 +1,6 @@
 /**
  * Subscriptions settings section: one card per subscription provider with an
- * OAuth login/logout flow driven by the node half's `subscriptionsAuth` Remote
+ * OAuth login/logout flow driven by the node half's `/subscriptions-auth` RPC
  * channel. Login state lives server-side; the page polls `status` only while
  * a login attempt is busy, so an idle page never polls. All state is local
  * React state — the page has no store.
@@ -14,10 +14,13 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
-import type { RemoteResult } from '@deepseek-ai/dsh-api-remotes/client'
-import type { SubscriptionJsonValue } from '../wire.js'
+import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import { en } from './locales.js'
+import { ProviderModelEditor } from './ProviderModelEditor.js'
 import type { SubscriptionsKey } from './locales.js'
+
+import { callSubscriptionsAuth, SubscriptionsAuthError } from './subscriptions-rpc.js'
+export { callSubscriptionsAuth } from './subscriptions-rpc.js'
 
 /** Poll cadence while a provider login attempt is busy. */
 const POLL_INTERVAL_MS = 2000
@@ -27,13 +30,6 @@ const POLL_INTERVAL_MS = 2000
  * filter; below it the list is short enough to scan.
  */
 const MODEL_FILTER_THRESHOLD = 8
-
-/**
- * Height cap of the expanded default-effort list, in px. Past it the list
- * scrolls internally so a provider with dozens of models cannot stretch the
- * card (roughly 7 rows, which keeps the next card's header on screen).
- */
-const MODEL_LIST_MAX_HEIGHT = 260
 
 /** Subscription provider ids, fixed by the node half's OAuth adapters. */
 export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot'
@@ -57,8 +53,6 @@ export interface ProviderStatus {
 /** `status` endpoint value: the node half owns this shape. */
 interface StatusResponse {
   providers: Record<SubscriptionProvider, ProviderStatus>
-  canViewUsage: boolean
-  canManageCredentials: boolean
 }
 
 /** One rate-limit window as answered by the `usage` endpoint. */
@@ -120,8 +114,8 @@ interface LoginResponse {
 
 /** Injected dependencies of {@link SubscriptionsSection} (slot `inject`). */
 export interface SubscriptionsSectionInjected {
-  /** Generated API Gateway namespace exposed by the Host plugin. */
-  remote: SubscriptionsAuthClient
+  /** Generic logical-RPC caller over the Connection transport. */
+  rpc: ConnectionHandle['rpc']
   /** Section copy: translate a 'settings.subscriptions' key with `{name}` template params. */
   t: (key: SubscriptionsKey, params?: Record<string, unknown>) => string
 }
@@ -139,43 +133,6 @@ const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [
   { id: 'grok', name: 'Grok (X Premium)' },
   { id: 'copilot', name: 'GitHub Copilot' },
 ]
-
-/** Business error returned by the `/subscriptions-auth` channel (error branch message). */
-class SubscriptionsAuthError extends Error {}
-
-/** Browser projection of the generated subscriptions-auth Remote namespace. */
-export interface SubscriptionsAuthClient {
-  /** Execute one action through API Gateway. */
-  execute(
-    action: string,
-    payload: SubscriptionJsonValue,
-    signal?: AbortSignal,
-  ): Promise<RemoteResult<SubscriptionJsonValue>>
-}
-
-/**
- * Call one `/subscriptions-auth` endpoint and unwrap the business result.
- * Shared by the settings section and the composer Speed toggle.
- * @param remote - generated API Gateway namespace.
- * @param action - plugin-owned action.
- * @param payload - action payload.
- * @returns the success value, cast by the caller to the endpoint's shape.
- */
-export async function callSubscriptionsAuth<T>(
-  remote: SubscriptionsAuthClient,
-  action: string,
-  payload: SubscriptionJsonValue,
-): Promise<T> {
-  let result: RemoteResult<SubscriptionJsonValue>
-  try {
-    result = await remote.execute(action, payload)
-  } catch (error) {
-    // The transport rejected rather than answering; surface the same way.
-    throw new SubscriptionsAuthError(error instanceof Error ? error.message : String(error))
-  }
-  if (!result.ok) throw new SubscriptionsAuthError(result.error.message)
-  return result.value as T
-}
 
 /** Human text of an action failure, SubscriptionsAuthError or not. */
 function messageOf(error: unknown): string {
@@ -269,54 +226,6 @@ const styles: Record<string, CSSProperties> = {
     background: 'var(--dsw-alias-bg-layer-1)', border: '1px solid var(--dsw-alias-border-l2)',
   },
   usageFill: { height: '100%', borderRadius: 3 },
-  defaultEffort: {
-    display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4,
-    borderTop: '1px solid var(--dsw-alias-border-l2)', paddingTop: 8,
-  },
-  /** The always-visible disclosure header: title, summary, chevron. */
-  defaultEffortToggle: {
-    boxSizing: 'border-box', display: 'flex', alignItems: 'center', gap: 8,
-    width: '100%', padding: 0, border: 'none', background: 'transparent',
-    font: 'inherit', textAlign: 'left', cursor: 'pointer',
-  },
-  defaultEffortChevron: {
-    marginLeft: 'auto', flexShrink: 0, fontSize: 10, lineHeight: '18px',
-    color: 'var(--dsw-alias-label-tertiary)',
-  },
-  /** Body of the expanded disclosure: bounded height so a long catalog scrolls. */
-  defaultEffortList: {
-    display: 'flex', flexDirection: 'column', gap: 6,
-    maxHeight: MODEL_LIST_MAX_HEIGHT, overflowY: 'auto', paddingRight: 2,
-  },
-  defaultEffortRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
-  defaultEffortName: {
-    fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-primary)',
-    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-  },
-  defaultEffortSaving: {
-    marginLeft: 'auto', flexShrink: 0,
-    fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)',
-  },
-  defaultEffortSelect: {
-    maxWidth: 220, flexShrink: 0, height: 28, boxSizing: 'border-box',
-    border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8,
-    padding: '0 8px', font: 'inherit', fontSize: 12, lineHeight: '18px',
-    background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)',
-  },
-  defaultEffortFilter: {
-    height: 28, width: '100%', boxSizing: 'border-box',
-    border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8,
-    padding: '0 8px', font: 'inherit', fontSize: 12, lineHeight: '18px',
-    background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)',
-  },
-  manual: { marginTop: 4, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-secondary)' },
-  manualRow: { display: 'flex', gap: 8, marginTop: 6 },
-  manualInput: {
-    flex: 1, height: 32, boxSizing: 'border-box',
-    border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8,
-    padding: '0 10px', font: 'inherit', fontSize: 14, lineHeight: '22px',
-    background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)',
-  },
   deviceCode: {
     marginTop: 4, display: 'flex', flexDirection: 'column', gap: 6,
     border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8,
@@ -527,11 +436,9 @@ export function modelDefaultsSignature(
  * @returns the section body, or a notice while the RPC face is absent.
  */
 export function SubscriptionsSection(props: SubscriptionsSectionProps) {
-  const { remote } = props
+  const { rpc } = props
   const t = props.t ?? fallbackTranslate
   const [statuses, setStatuses] = useState<Partial<Record<SubscriptionProvider, ProviderStatus>>>({})
-  const [canViewUsage, setCanViewUsage] = useState(false)
-  const [canManageCredentials, setCanManageCredentials] = useState(false)
   const [errors, setErrors] = useState<Partial<Record<SubscriptionProvider, string>>>({})
   const [manualDrafts, setManualDrafts] = useState<Record<SubscriptionProvider, string>>({
     codex: '', claude: '', grok: '', copilot: '',
@@ -562,25 +469,6 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [proxyTesting, setProxyTesting] = useState(false)
   const [proxyMessage, setProxyMessage] = useState<{ tone: 'success' | 'error'; text: string } | undefined>(undefined)
   const [proxyTestResult, setProxyTestResult] = useState<ProxyTestResult | undefined>(undefined)
-  /** Per-model default-effort picker state as answered by `modelDefaults`. */
-  const [modelDefaults, setModelDefaults] = useState<Partial<Record<SubscriptionProvider, ModelDefaultsCatalog>>>({})
-  const [modelDefaultsLoading, setModelDefaultsLoading] = useState(false)
-  const [modelDefaultsLoadError, setModelDefaultsLoadError] = useState<string | undefined>(undefined)
-  /** One set in flight: the `${provider}/${model}` key. */
-  const [modelDefaultsSaving, setModelDefaultsSaving] = useState<string | undefined>(undefined)
-  /** Per-model save failures, keyed `${provider}/${model}`. */
-  const [modelDefaultsSaveErrors, setModelDefaultsSaveErrors] = useState<Record<string, string>>({})
-  /** Providers whose default-effort disclosure is open (collapsed by default). */
-  const [modelDefaultsOpen, setModelDefaultsOpen] = useState<Partial<Record<SubscriptionProvider, boolean>>>({})
-  /** Per-provider name filter of the expanded list. */
-  const [modelDefaultsFilters, setModelDefaultsFilters] = useState<Partial<Record<SubscriptionProvider, string>>>({})
-  /** Account signature the last completed catalog fetch was answered for. */
-  const [modelDefaultsLoadedFor, setModelDefaultsLoadedFor] = useState<string | undefined>(undefined)
-  /** Optimistic in-flight selections, keyed `${provider}/${model}` ('' = follow provider). */
-  const [modelDefaultsPending, setModelDefaultsPending] = useState<Record<string, string>>({})
-  /** Guard the catalog effect against concurrent loads. */
-  const modelDefaultsInflightRef = useRef(false)
-
   const setProviderError = useCallback((provider: SubscriptionProvider, message: string | undefined): void => {
     if (!mountedRef.current) return
     setErrors((prev) => {
@@ -601,10 +489,10 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
 
   /** Refetch every provider's status; stop a provider's poller once its attempt settles. */
   const refresh = useCallback(async (): Promise<void> => {
-    if (remote === undefined) return
+    if (rpc === undefined) return
     let response: StatusResponse
     try {
-      response = await callSubscriptionsAuth<StatusResponse>(remote, 'status', {})
+      response = await callSubscriptionsAuth<StatusResponse>(rpc, 'status', {})
     } catch {
       // A failed poll must not kill the page; busy providers keep polling and
       // the action paths report their own errors.
@@ -612,8 +500,6 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     }
     if (!mountedRef.current) return
     setStatuses(response.providers)
-    setCanViewUsage(response.canViewUsage)
-    setCanManageCredentials(response.canManageCredentials)
     for (const { id } of PROVIDERS) {
       const status = response.providers[id]
       if (status.accounts.length > 0 || !status.busy) {
@@ -627,7 +513,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
         })
       }
     }
-  }, [remote, stopPolling])
+  }, [rpc, stopPolling])
 
   const startPolling = useCallback((provider: SubscriptionProvider): void => {
     if (pollersRef.current.has(provider)) return
@@ -656,11 +542,11 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
 
   const loadUsage = useCallback(async (provider: SubscriptionProvider, account: string, force = false): Promise<void> => {
     const key = `${provider}:${account}`
-    if (!canViewUsage || remote === undefined || usageInflightRef.current.has(key)) return
+    if (rpc === undefined || usageInflightRef.current.has(key)) return
     usageInflightRef.current.add(key)
     setUsageLoading(prev => ({ ...prev, [key]: true }))
     try {
-      const usage = await callSubscriptionsAuth<ProviderUsage>(remote, 'usage', { provider, account, ...force ? { force: true } : {} })
+      const usage = await callSubscriptionsAuth<ProviderUsage>(rpc, 'usage', { provider, account, ...force ? { force: true } : {} })
       if (!mountedRef.current) return
       setUsages(prev => ({ ...prev, [key]: usage }))
       setUsageErrors((prev) => {
@@ -674,17 +560,12 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       usageInflightRef.current.delete(key)
       if (mountedRef.current) setUsageLoading(prev => ({ ...prev, [key]: false }))
     }
-  }, [remote, canViewUsage])
+  }, [rpc])
 
   // Fetch usage once an account is logged in; drop the snapshots of accounts
   // that vanished so a re-login refetches. A failed lookup does not auto-retry
   // — the per-account Refresh button is the retry path.
   useEffect(() => {
-    if (!canViewUsage) {
-      if (Object.keys(usages).length > 0) setUsages({})
-      if (Object.keys(usageErrors).length > 0) setUsageErrors({})
-      return
-    }
     const live = new Set<string>()
     for (const { id } of PROVIDERS) {
       for (const account of statuses[id]?.accounts ?? []) {
@@ -695,141 +576,13 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     }
     setUsages(prev => dropStale(prev, live))
     setUsageErrors(prev => dropStale(prev, live))
-  }, [statuses, usages, usageErrors, loadUsage, canViewUsage])
-
-  const loadModelDefaultsData = useCallback(async (signature: string): Promise<void> => {
-    if (remote === undefined || modelDefaultsInflightRef.current) return
-    modelDefaultsInflightRef.current = true
-    setModelDefaultsLoading(true)
-    try {
-      const catalog = await callSubscriptionsAuth<ModelDefaultsCatalog[]>(remote, 'modelDefaults', {})
-      if (!mountedRef.current) return
-      const next: Partial<Record<SubscriptionProvider, ModelDefaultsCatalog>> = {}
-      for (const entry of catalog) next[entry.provider] = entry
-      setModelDefaults(next)
-      setModelDefaultsLoadError(undefined)
-      // Latch the answered signature, empty answer included: an empty catalog
-      // is a result, not a missing load, and re-deriving "loaded" from the
-      // payload re-triggered this fetch on every render.
-      setModelDefaultsLoadedFor(signature)
-      // The shown state is now authoritative; stale per-row failures would
-      // otherwise linger next to rows that are correct again.
-      setModelDefaultsSaveErrors({})
-    } catch (error) {
-      if (mountedRef.current) setModelDefaultsLoadError(messageOf(error))
-    } finally {
-      modelDefaultsInflightRef.current = false
-      if (mountedRef.current) setModelDefaultsLoading(false)
-    }
-  }, [remote])
-
-  // Fetch the default-effort catalogs only once a card's list is expanded: the
-  // node half resolves live model info per model, so a collapsed page must not
-  // pay for it. One fetch covers every logged-in provider (the node half
-  // answers them together), and the levels follow the picker's catalog union
-  // across that provider's accounts. The account signature drives refetching,
-  // so connecting another provider or account does not leave an open card on
-  // the previous answer. Everything resets once the last account logs out.
-  useEffect(() => {
-    const loggedIn = PROVIDERS.filter(({ id }) => hasAccount(statuses[id])).map(({ id }) => id)
-    const signature = modelDefaultsSignature(statuses)
-    if (loggedIn.length > 0) {
-      const open = PROVIDERS.filter(({ id }) => modelDefaultsOpen[id] === true).map(({ id }) => id)
-      if (shouldFetchModelDefaults({
-        loggedIn,
-        open,
-        loadedFor: modelDefaultsLoadedFor,
-        signature,
-        failed: modelDefaultsLoadError !== undefined,
-      })) {
-        void loadModelDefaultsData(signature)
-      }
-    } else if (modelDefaultsLoadedFor !== undefined
-      || Object.keys(modelDefaults).length > 0
-      || Object.keys(modelDefaultsOpen).length > 0) {
-      setModelDefaults({})
-      setModelDefaultsSaveErrors({})
-      setModelDefaultsLoadError(undefined)
-      setModelDefaultsLoadedFor(undefined)
-      setModelDefaultsLoading(false)
-      setModelDefaultsOpen({})
-      setModelDefaultsFilters({})
-    }
-  }, [
-    statuses,
-    modelDefaults,
-    modelDefaultsOpen,
-    modelDefaultsLoadError,
-    modelDefaultsLoadedFor,
-    loadModelDefaultsData,
-  ])
-
-  /** Open or close one provider's default-effort disclosure. */
-  const toggleModelDefaults = useCallback((provider: SubscriptionProvider): void => {
-    setModelDefaultsOpen(prev => ({ ...prev, [provider]: prev[provider] !== true }))
-  }, [])
-
-  const setModelDefault = useCallback(async (provider: SubscriptionProvider, model: string, effort: string | undefined): Promise<void> => {
-    if (remote === undefined) return
-    const key = `${provider}/${model}`
-    setModelDefaultsSaving(key)
-    // Hold the picked level locally for the duration of the save: the select
-    // is controlled by server state, which only updates after the round trip,
-    // so without this the row visibly snaps back to "Follow provider" (greyed
-    // out) mid-save and reads as a rejected change.
-    setModelDefaultsPending(prev => ({ ...prev, [key]: effort ?? '' }))
-    setModelDefaultsSaveErrors((prev) => {
-      const next = { ...prev }
-      delete next[key]
-      return next
-    })
-    try {
-      await callSubscriptionsAuth<{ ok: true }>(remote, 'setModelDefault', {
-        provider,
-        model,
-        ...(effort === undefined ? {} : { effort }),
-      })
-      if (!mountedRef.current) return
-      setModelDefaults((prev) => {
-        const section = prev[provider]
-        if (section === undefined) return prev
-        return {
-          ...prev,
-          [provider]: {
-            ...section,
-            models: section.models.map((entry) => {
-              if (entry.id !== model) return entry
-              if (effort !== undefined) return { ...entry, configured: effort }
-              // Cleared: drop the key rather than keep the stale level, or the
-              // select would snap back and the header would keep counting it.
-              const { configured: _cleared, ...rest } = entry
-              return rest
-            }),
-          },
-        }
-      })
-    } catch (error) {
-      if (mountedRef.current) setModelDefaultsSaveErrors((prev) => ({ ...prev, [key]: messageOf(error) }))
-    } finally {
-      if (mountedRef.current) {
-        setModelDefaultsSaving(current => current === key ? undefined : current)
-        // Drop the optimistic value: on success the server state now carries
-        // it, on failure the row must fall back to the real stored level
-        // rather than keep showing a change that did not land.
-        setModelDefaultsPending((prev) => {
-          const next = { ...prev }
-          delete next[key]
-          return next
-        })
-      }
-    }
-  }, [remote])
+  }, [statuses, usages, usageErrors, loadUsage])
 
   const login = useCallback(async (provider: SubscriptionProvider, method?: 'oauth' | 'keychain'): Promise<void> => {
-    if (remote === undefined) return
+    if (rpc === undefined) return
     setProviderError(provider, undefined)
     try {
-      const response = await callSubscriptionsAuth<LoginResponse>(remote, 'login', {
+      const response = await callSubscriptionsAuth<LoginResponse>(rpc, 'login', {
         provider,
         ...method === undefined ? {} : { method },
       })
@@ -858,55 +611,55 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     } catch (error) {
       setProviderError(provider, messageOf(error))
     }
-  }, [remote, t, setProviderError, startPolling])
+  }, [rpc, t, setProviderError, startPolling])
 
   const cancel = useCallback(async (provider: SubscriptionProvider): Promise<void> => {
-    if (remote === undefined) return
+    if (rpc === undefined) return
     stopPolling(provider)
     try {
-      await callSubscriptionsAuth<{ ok: true }>(remote, 'cancel', { provider })
+      await callSubscriptionsAuth<{ ok: true }>(rpc, 'cancel', { provider })
     } catch (error) {
       setProviderError(provider, messageOf(error))
     }
     await refresh()
-  }, [remote, stopPolling, setProviderError, refresh])
+  }, [rpc, stopPolling, setProviderError, refresh])
 
   const submitManual = useCallback(async (provider: SubscriptionProvider): Promise<void> => {
-    if (remote === undefined) return
+    if (rpc === undefined) return
     const input = manualDrafts[provider].trim()
     if (input === '') return
     setProviderError(provider, undefined)
     try {
-      await callSubscriptionsAuth<{ ok: true }>(remote, 'manual', { provider, input })
+      await callSubscriptionsAuth<{ ok: true }>(rpc, 'manual', { provider, input })
       if (mountedRef.current) setManualDrafts(prev => ({ ...prev, [provider]: '' }))
     } catch (error) {
       setProviderError(provider, messageOf(error))
     }
     await refresh()
-  }, [remote, manualDrafts, setProviderError, refresh])
+  }, [rpc, manualDrafts, setProviderError, refresh])
 
   const logout = useCallback(async (provider: SubscriptionProvider, account: string, display: string, name: string): Promise<void> => {
-    if (remote === undefined) return
+    if (rpc === undefined) return
     if (!window.confirm(t('logoutAccountConfirm', { provider: name, account: display }))) return
     setProviderError(provider, undefined)
     try {
-      await callSubscriptionsAuth<{ ok: true }>(remote, 'logout', { provider, account })
+      await callSubscriptionsAuth<{ ok: true }>(rpc, 'logout', { provider, account })
     } catch (error) {
       setProviderError(provider, messageOf(error))
     }
     await refresh()
-  }, [remote, t, setProviderError, refresh])
+  }, [rpc, t, setProviderError, refresh])
 
   const setDefault = useCallback(async (provider: SubscriptionProvider, account: string): Promise<void> => {
-    if (remote === undefined) return
+    if (rpc === undefined) return
     setProviderError(provider, undefined)
     try {
-      await callSubscriptionsAuth<{ ok: true }>(remote, 'setDefault', { provider, account })
+      await callSubscriptionsAuth<{ ok: true }>(rpc, 'setDefault', { provider, account })
     } catch (error) {
       setProviderError(provider, messageOf(error))
     }
     await refresh()
-  }, [remote, setProviderError, refresh])
+  }, [rpc, setProviderError, refresh])
 
   const copyDeviceCode = useCallback((provider: SubscriptionProvider, userCode: string): void => {
     void navigator.clipboard?.writeText(userCode).then(() => {
@@ -922,13 +675,9 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
 
   // Proxy configuration: load once on mount; the dialog drives proxySet/proxyTest.
   useEffect(() => {
-    if (remote === undefined || !canManageCredentials) {
-      setProxy(undefined)
-      setProxyLoadError(undefined)
-      return
-    }
+    if (rpc === undefined) return
     let alive = true
-    void callSubscriptionsAuth<ProxyConfigView>(remote, 'proxyGet', {}).then((view) => {
+    void callSubscriptionsAuth<ProxyConfigView>(rpc, 'proxyGet', {}).then((view) => {
       if (!alive) return
       setProxy(view)
       setProxyLoadError(undefined)
@@ -936,7 +685,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       if (alive) setProxyLoadError(messageOf(error))
     })
     return () => { alive = false }
-  }, [remote, canManageCredentials])
+  }, [rpc])
 
   useEffect(() => {
     if (!proxyOpen) return
@@ -961,11 +710,11 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   }, [proxy])
 
   const saveProxy = useCallback(async (): Promise<void> => {
-    if (remote === undefined) return
+    if (rpc === undefined) return
     setProxySaving(true)
     setProxyMessage(undefined)
     try {
-      const view = await callSubscriptionsAuth<ProxyConfigView>(remote, 'proxySet', {
+      const view = await callSubscriptionsAuth<ProxyConfigView>(rpc, 'proxySet', {
         enabled: proxyEnabled,
         url: proxyUrl.trim(),
         username: proxyUsername,
@@ -981,16 +730,16 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     } finally {
       setProxySaving(false)
     }
-  }, [remote, proxyEnabled, proxyUrl, proxyUsername, proxyPassword, proxyClearPassword, proxyBypass, t])
+  }, [rpc, proxyEnabled, proxyUrl, proxyUsername, proxyPassword, proxyClearPassword, proxyBypass, t])
 
   const testProxy = useCallback(async (): Promise<void> => {
-    if (remote === undefined || proxyTesting) return
+    if (rpc === undefined || proxyTesting) return
     setProxyTesting(true)
     setProxyTestResult(undefined)
     try {
       // Test the dialog's current inputs (they do not need to be saved first);
       // the host builds a throwaway agent for the probe.
-      setProxyTestResult(await callSubscriptionsAuth<ProxyTestResult>(remote, 'proxyTest', {
+      setProxyTestResult(await callSubscriptionsAuth<ProxyTestResult>(rpc, 'proxyTest', {
         proxy: {
           url: proxyUrl.trim(),
           ...proxyUsername.trim() !== '' ? { username: proxyUsername.trim() } : {},
@@ -1002,39 +751,35 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     } finally {
       setProxyTesting(false)
     }
-  }, [remote, proxyTesting, proxyUrl, proxyUsername, proxyPassword])
+  }, [rpc, proxyTesting, proxyUrl, proxyUsername, proxyPassword])
 
-  if (remote === undefined) {
+  if (rpc === undefined) {
     return <p style={styles.intro}>{t('unavailable')}</p>
   }
 
   return (
     <div style={styles.section}>
       <p style={styles.intro}>{t('intro')}</p>
-      {canManageCredentials && (
-        <>
-          <div style={styles.proxyCard}>
-            <div style={styles.cardHeader}>
-              <span style={{
-                ...styles.dot,
-                background: proxy?.enabled === true
-                  ? 'var(--dsw-alias-state-success-primary)'
-                  : 'var(--dsw-alias-label-dimmed)',
-              }} />
-              <span style={styles.name}>{t('proxyTitle')}</span>
-              <button
-                type="button"
-                style={{ ...styles.button, marginLeft: 'auto', flexShrink: 0 }}
-                onClick={openProxyDialog}
-              >
-                {t('proxyConfigure')}
-              </button>
-            </div>
-            <p style={styles.statusLine}>{proxyStatusText(t, proxy, proxyLoadError)}</p>
-          </div>
-          <div style={styles.separator} />
-        </>
-      )}
+      <div style={styles.proxyCard}>
+        <div style={styles.cardHeader}>
+          <span style={{
+            ...styles.dot,
+            background: proxy?.enabled === true
+              ? 'var(--dsw-alias-state-success-primary)'
+              : 'var(--dsw-alias-label-dimmed)',
+          }} />
+          <span style={styles.name}>{t('proxyTitle')}</span>
+          <button
+            type="button"
+            style={{ ...styles.button, marginLeft: 'auto', flexShrink: 0 }}
+            onClick={openProxyDialog}
+          >
+            {t('proxyConfigure')}
+          </button>
+        </div>
+        <p style={styles.statusLine}>{proxyStatusText(t, proxy, proxyLoadError)}</p>
+      </div>
+      <div style={styles.separator} />
       {PROVIDERS.map(({ id, name }) => {
         const status = statuses[id]
         const busy = status?.busy === true
@@ -1057,7 +802,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
               const usageError = usageErrors[usageKey]
               const display = account.account ?? account.key
               // Providers without a usage endpoint answer supported:false — no block.
-              const showUsage = canViewUsage && usage?.supported !== false
+              const showUsage = usage?.supported !== false
                 && (usage !== undefined || usageError !== undefined || usageLoading[usageKey] === true)
               return (
                 <div key={account.key} style={styles.accountRow}>
@@ -1137,7 +882,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                 </div>
               )
             })}
-            {canManageCredentials && <div style={styles.actions}>
+            <div style={styles.actions}>
               {!busy && accounts.length === 0 && (
                 <button type="button" style={styles.button} onClick={() => { void login(id) }}>
                   {t('login')}
@@ -1163,149 +908,12 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                   {t('cancel')}
                 </button>
               )}
-            </div>}
-            {canManageCredentials && !busy && accounts.length > 0 && (
+            </div>
+            {!busy && accounts.length > 0 && (
               <p style={styles.statusLine}>{t('addAccountHint')}</p>
             )}
-            {canManageCredentials && accounts.length > 0 && (() => {
-              // Collapsed by default: providers with a large catalog (Copilot
-              // lists dozens of models) must not push the page down. The
-              // header carries the summary so the collapsed state still says
-              // how many models are overridden. The section is per provider,
-              // not per account: the override keys off the model id, which the
-              // pool shares across a provider's accounts.
-              const open = modelDefaultsOpen[id] === true
-              const catalog = modelDefaults[id]
-              const filter = modelDefaultsFilters[id] ?? ''
-              const view = deriveModelDefaultsView(catalog?.models, filter)
-              const saveErrors = Object.entries(modelDefaultsSaveErrors).filter(([key]) => key.startsWith(`${id}/`))
-              return (
-                <div style={styles.defaultEffort}>
-                  <button
-                    type="button"
-                    style={styles.defaultEffortToggle}
-                    aria-expanded={open}
-                    onClick={() => { toggleModelDefaults(id) }}
-                  >
-                    <span style={styles.usageTitle}>{t('modelDefaultsTitle')}</span>
-                    <span style={styles.usagePlan}>
-                      {catalog === undefined
-                        ? (modelDefaultsLoading ? t('modelDefaultsLoading') : '')
-                        : view.total === 0
-                          ? t('modelDefaultsSummaryEmpty')
-                          : view.overridden === 0
-                            ? t('modelDefaultsSummaryNone', { total: view.total })
-                            : t('modelDefaultsSummary', { total: view.total, configured: view.overridden })}
-                    </span>
-                    {/* Decoration: `aria-expanded` on the button already
-                        carries the state, and labelling the glyph only
-                        appended it to the button's accessible name. */}
-                    <span style={styles.defaultEffortChevron} aria-hidden="true">
-                      {open ? '▲' : '▼'}
-                    </span>
-                  </button>
-                  {/* Save failures stay visible while collapsed: a row the user
-                      cannot see must not swallow its own error. */}
-                  {saveErrors.map(([key, message]) => (
-                    // Named: the failing row may be scrolled out of the
-                    // bounded list, and several anonymous "Save failed" lines
-                    // cannot be told apart.
-                    <p key={key} style={styles.errorLine} role="alert">
-                      {t('modelDefaultsSaveFailedNamed', {
-                        model: catalog?.models.find(entry => `${id}/${entry.id}` === key)?.name
-                          ?? key.slice(id.length + 1),
-                        message,
-                      })}
-                    </p>
-                  ))}
-                  {open && (
-                    <>
-                      <p style={styles.statusLine}>{t('modelDefaultsHint')}</p>
-                      {modelDefaultsLoadError !== undefined && (
-                        <>
-                          <p style={styles.errorLine}>{t('modelDefaultsLoadFailed', { message: modelDefaultsLoadError })}</p>
-                          <div style={styles.actions}>
-                            <button
-                              type="button"
-                              style={styles.button}
-                              onClick={() => {
-                                // Clearing the latch lets the effect pick the
-                                // fetch back up on the next render.
-                                setModelDefaultsLoadError(undefined)
-                              }}
-                            >
-                              {t('modelDefaultsRetry')}
-                            </button>
-                          </div>
-                        </>
-                      )}
-                      {modelDefaultsLoadError === undefined && catalog === undefined && (
-                        <p style={styles.statusLine}>{t('modelDefaultsLoading')}</p>
-                      )}
-                      {view.showFilter && (
-                        <input
-                          style={styles.defaultEffortFilter}
-                          value={filter}
-                          placeholder={t('modelDefaultsFilterPlaceholder')}
-                          // The placeholder disappears once the user types, so
-                          // the name has to live somewhere permanent too.
-                          aria-label={t('modelDefaultsFilterPlaceholder')}
-                          onChange={(event) => {
-                            setModelDefaultsFilters(prev => ({ ...prev, [id]: event.target.value }))
-                          }}
-                        />
-                      )}
-                      {view.shown.length > 0 && (
-                        <div style={styles.defaultEffortList}>
-                          {view.shown.map((model) => {
-                            const rowKey = `${id}/${model.id}`
-                            const saving = modelDefaultsSaving === rowKey
-                            // Ids carry the provider: a model id alone repeats
-                            // across cards, and duplicate ids break the label
-                            // association the select relies on.
-                            const labelId = `dsh-model-default-${id}-${model.id}`
-                            return (
-                              <div key={model.id} style={styles.defaultEffortRow}>
-                                <span id={labelId} style={styles.defaultEffortName} title={model.id}>{model.name}</span>
-                                {saving && (
-                                  <span style={styles.defaultEffortSaving}>{t('modelDefaultsSaving')}</span>
-                                )}
-                                <select
-                                  style={styles.defaultEffortSelect}
-                                  // The row's only accessible name: a sibling
-                                  // span is not associated by adjacency, which
-                                  // left every select announced identically.
-                                  aria-labelledby={labelId}
-                                  value={modelDefaultsPending[rowKey] ?? model.configured ?? ''}
-                                  disabled={saving}
-                                  onChange={(event) => {
-                                    void setModelDefault(id, model.id, event.target.value === '' ? undefined : event.target.value)
-                                  }}
-                                >
-                                  <option value="">{t('modelDefaultsFollowProvider')}</option>
-                                  {model.efforts.map(effort => (
-                                    <option key={effort.id} value={effort.id}>{effort.name}</option>
-                                  ))}
-                                </select>
-                              </div>
-                            )
-                          })}
-                        </div>
-                      )}
-                      {catalog !== undefined && view.shown.length === 0 && filter.trim() !== '' && (
-                        <p style={styles.statusLine}>{t('modelDefaultsFilterEmpty', { query: filter.trim() })}</p>
-                      )}
-                      {/* Models without reasoning levels collapse into one
-                          count line instead of one dead row each. */}
-                      {view.withoutEfforts > 0 && (
-                        <p style={styles.statusLine}>{t('modelDefaultsNoLevels', { count: view.withoutEfforts })}</p>
-                      )}
-                    </>
-                  )}
-                </div>
-              )
-            })()}
-            {canManageCredentials && busy && deviceCode !== undefined && (
+            <ProviderModelEditor provider={id} rpc={rpc} t={t} />
+            {busy && deviceCode !== undefined && (
               <div style={styles.deviceCode}>
                 <span style={styles.statusLine}>{t('deviceCodePrompt')}</span>
                 <span style={styles.deviceCodeText}>{deviceCode.userCode}</span>
@@ -1323,7 +931,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                 </div>
               </div>
             )}
-            {canManageCredentials && busy && deviceCode === undefined && (
+            {busy && deviceCode === undefined && (
               <details style={styles.manual}>
                 <summary>{t('manualSummary')}</summary>
                 <div style={styles.manualRow}>
@@ -1342,7 +950,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
           </div>
         )
       })}
-      {canManageCredentials && proxyOpen && (
+      {proxyOpen && (
         <div style={styles.modalOverlay} onClick={() => setProxyOpen(false)}>
           <div style={styles.modal} onClick={event => event.stopPropagation()}>
             <div style={styles.modalHeader}>

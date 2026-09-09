@@ -2,7 +2,7 @@
  * Keyed toolview for the `video_generate` tool: renders the generated video
  * inline in the conversation. The row shows the call's prompt while running
  * and after settling; a settled success loads the MP4 bytes through the node
- * half's `subscriptionsAuth` Remote namespace (by bare file name), builds a
+ * half's `/subscriptions-auth` `video` endpoint (by bare file name), builds a
  * Blob URL, and plays it in a native `<video controls>` element. The file
  * name comes from the result's presentation meta when the dispatch was
  * top-level, and is recovered from the "Saved video to …" text line for
@@ -15,12 +15,14 @@
  */
 import { useEffect, useState } from 'react'
 import type { CSSProperties } from 'react'
-import type { ToolCallBlock } from '@deepseek-ai/dsh-client-ui-chat/client'
+import type { ConnectionHandle, RpcResult } from '@deepseek-ai/dsh-api-remotes/client'
+import type { ToolCallBlock } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { IconSparkle16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
-import { callSubscriptionsAuth } from './SubscriptionsSection.js'
-import type { SubscriptionsAuthClient } from './SubscriptionsSection.js'
+
+/** Logical RPC channel served by the node half of this plugin. */
+const SUBSCRIPTIONS_AUTH_CHANNEL = '/subscriptions-auth'
 
 /** Title prompt truncation budget (characters). */
 const PROMPT_MAX_LENGTH = 60
@@ -31,7 +33,6 @@ interface ToolCallOwnerProps {
   toolName: string
   block: ToolCallBlock
   cwd?: string | undefined
-  home?: string | undefined
   openFile: (path: string) => void
   inspect?: (() => void) | undefined
 }
@@ -58,12 +59,16 @@ export type VideoGenerateToolviewProps =
   & { t?: ((key: SubscriptionsKey, params?: Record<string, unknown>) => string) | undefined }
 
 /**
- * Build the video loader over the subscriptions-auth Remote namespace.
- * @param remote - generated subscriptions-auth Remote namespace.
+ * Build the video loader over the `/subscriptions-auth` `video` endpoint.
+ * @param rpc - Connection RPC caller.
  * @returns loader resolving a bare file name to the decoded bytes.
  */
-export function createVideoLoader(remote: SubscriptionsAuthClient): (name: string) => Promise<VideoBytes> {
-  return name => callSubscriptionsAuth<VideoBytes>(remote, 'video', { name })
+export function createVideoLoader(rpc: ConnectionHandle['rpc']): (name: string) => Promise<VideoBytes> {
+  return async (name) => {
+    const result: RpcResult<unknown> = await rpc.call(SUBSCRIPTIONS_AUTH_CHANNEL, 'video', { name })
+    if (!result.ok) throw new Error(result.error.message)
+    return result.value as VideoBytes
+  }
 }
 
 /**

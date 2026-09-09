@@ -6,9 +6,17 @@
 
 ## 演示
 
-设置 → **订阅**:每个 provider 的登录/退出,无需 API key。Claude 有 Claude Code 会话时导入凭据,否则和 Codex、Grok 一样走 OAuth(截图中账号已打码):
+设置 → **订阅**:每个 provider 的登录/退出,无需 API key。Claude 有 Claude Code 会话时导入凭据,否则和 Codex、Grok 一样走 OAuth(以下设置截图使用演示账号与目录数据):
 
 ![订阅设置页](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/subscriptions.png)
+
+模型显示、默认推理档和上下文已合并到 **编辑模型列表**，统一保存或取消：
+
+![Model settings](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/model-settings.png)
+
+按 provider 配置图片生成、视频生成和 X 搜索，工具开关仅影响保存后新建的会话：
+
+![Provider tools](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/provider-tools.png)
 
 已登录的 provider 会带着实时模型目录进入会话模型选择器:
 
@@ -61,7 +69,21 @@ Grok 模型选择器只显示 Grok 4.6 和 Grok 4.5。实时目录、持久化�
 - **`image_generate`**(ChatGPT 或 Grok)—— 经 Codex 后端调用 `gpt-image-2`,或经 `api.x.ai/v1/images/generations` 调用 `grok-imagine-image-2.0`。`provider` 参数指定首选提供方(`gpt` 为默认值,可选 `grok`);首选方未登录时自动回退到另一方。图片保存到 `~/.dsh/plugins/subscriptions/images/` 并返回路径。Grok 路径上 `size`/`quality` 参数会映射为 Grok 的 `aspect_ratio`/`quality`。
 - **`video_generate`**(Grok)—— 经 `api.x.ai/v1/videos` 调用 `grok-imagine-video-1.5`(异步提交 + 轮询);MP4 保存到 `~/.dsh/plugins/subscriptions/videos/` 并返回路径,视频直接在对话里内联播放。支持时长(1–15 秒)、宽高比、分辨率,以及通过 `image_url` 做图生视频。
 
+`image_generate` 也支持编辑：模型在需要修改或参考已有图片时传入可选的 `referenceImages`（1–5 张完整 DSH 附件引用），未传时继续文生图。参考图可以来自用户上传、`read_image` 的结果或之前生成的图片；本地文件需先调用 `read_image`，不能把文件路径当作引用。图片旁的引用文本和工具结构化结果可直接复用。引用顺序对应提示词中的图片顺序，编辑结果保存为新文件并可继续编辑，也可切换 GPT/Grok 使用同一参考图。
+
+Codex 编辑走 `/backend-api/codex/images/edits`，Grok 编辑走 `/v1/images/edits`；沿用现有 provider 偏好、未登录回退及会话工具开关。空数组、重复或无效引用、超过附件限制会报错，不会降级为文生图；编辑需要 DSH 附件服务。
+
+图片生成与编辑共用同 provider 的账号调度：首次优先默认账号，成功后在当前会话优先复用；收到明确的额度、认证或图片能力拒绝时尝试其余账号。401 最多刷新后重试一次。冷却状态仅用于图片请求，并读取服务商返回的重置时间；登录/退出会清理相关状态。网络中断、超时、5xx 和参数错误不会自动重发，避免重复出图。`pool.enabled: false` 或 `pool.autoAccounts: false`（兼容 `autoFamilies`）关闭图片自动账号池，恢复默认账号直连。图片调度不使用对话模型目录、对话用量评分、`families` 或 `tiers`。
+
 ## 安装
+
+### 刷新模型列表
+
+在 **设置 → 订阅 → 对应 provider → 编辑模型列表** 中点击 **刷新**，可绕过五分钟目录缓存，并通知会话模型选择器重新读取。这与刷新订阅用量是两个独立操作。如果显式配置了非空的 `models.<provider>`，仍使用指定列表，不进行在线发现。
+
+Codex 的目录可见性受请求中的 `client_version` 影响。默认自动读取 npm 官方 `@openai/codex` 包公开元数据中的稳定版本，不安装 CLI，也不向 npm 发送订阅登录凭据。查询成功后在内存缓存六小时；失败后五分钟再试，保留上次成功版本，首次失败则回退到已验证的 `0.153.4`。查询最多等待 1.5 秒，多账号共用查询，忽略预发布版和低于当前已知版本的结果。手动刷新模型列表也会重新检查版本。显式配置 `codexClientVersion: '0.153.4'` 时优先使用该值，并关闭自动查询；更改配置后需重启 DSH。模型仍以账号实际权限为准，详见[验证记录](docs/codex-catalog-refresh.md)。
+
+### 安装命令
 
 本机已有 `dsh` CLI 时,从 npm 安装(预构建产物,无需构建授权):
 
@@ -123,11 +145,21 @@ GitHub 安装的:重新执行一遍 `add github:V1ki/dsh-plugin-subscriptions` �
 
 每个 provider 可以登录多个账号:连上第一个之后,卡片会出现「添加账号」按钮(Claude 拆分为「浏览器授权」和「导入 Claude Code」两种)。账号按身份(邮箱/用户名)归档——重复登录同一账号是覆盖更新,不同账号才是新增。浏览器授权以浏览器当前登录的账号为准,要添加不同账号请先在浏览器切换账号,或用无痕窗口走手动授权码。★ 默认账号服务直连路由;池路由会使用所有账号。从 Claude Code 导入的 Claude 账号会与 CLI 的凭据存储保持同步;OAuth 添加的 Claude 账号独立刷新,多个账号不会互相覆盖 Keychain。
 
-### 按模型的默认推理档
+### 编辑模型列表、上下文与工具
 
-**设置 → 订阅**里每个已登录 provider 卡片都有一个可折叠的**默认推理档**区块。默认收起,标题栏直接给出「多少个模型声明了推理档 / 已覆盖多少个」;模型列表(以及它背后的 live 目录查询)只在展开时才加载 —— 这样模型数量很多的 provider(Copilot 动辄几十个)既不会把页面撑长,也不会白跑一次目录查询。展开后,凡声明了推理档的模型各占一行,可选档位就是该 provider live 目录为这个模型声明的档位;此类模型超过 8 个时区块还会给出一个名称筛选框;没有推理档的模型不再一行一条占位,而是合并成一行计数说明。登录了多个账号时,模型列表是该 provider 各账号目录的并集 —— 任一账号声明的模型都会出现;而某个模型可选的档位取自**第一个列出它的账号**(★ 默认账号优先),与会话选择器解析到的一致。
+在 **设置 → 订阅 → 对应 provider → 编辑模型列表** 中搜索并勾选要显示的模型，再点击 **保存更改**。默认自动显示全部模型；手动勾选、全选或清空后会保存明确的显示列表，以后发现的新模型不会自动加入。重新勾选「自动显示全部模型」即可恢复。隐藏仅影响模型选择器和默认推理档列表，已有会话仍可使用隐藏模型；编辑器始终保留完整目录，可随时恢复显示。刷新目录不会覆盖选择，取消会丢弃尚未保存的编辑。
 
-选中某档后,会话模型选择器在切换到该模型时会自动预选该档位,不必再接受 provider 自己的默认值(例如 Claude 只显示 `Default`,Codex 模型跟随 `default_reasoning_level`)。选择「跟随服务商」可清除覆盖。配置存于 `~/.dsh/plugins/subscriptions/model-defaults.json`(权限 0600),重启后依然生效。
+Codex 模型还可填写上下文 token 数，留空跟随服务商。插件读取每个账号的 `context_window` 与 `max_context_window`，实际使用 `min(配置值, 账号最大值)`；未返回最大值时，保守地以上下文默认值为上限。账号池按实际成员分别解析并取最小窗口。这只调整 DSH 的本地上下文预算与压缩时机，不向 API 发送扩大容量的参数。更长的上下文可能增加响应延迟。
+
+同一区块可开关 Codex 的图片生成，以及 Grok 的图片生成、视频生成和 X 搜索。工具策略只影响保存后新建的会话；已有会话及其重启后的恢复保留创建时的策略。图片生成是共享工具，只有 Codex 与 Grok 均关闭或未配置时才完全隐藏；调用时也不会回退到该会话已禁用的 provider。Claude 和 Copilot 当前没有本插件提供的独立工具开关。
+
+设置和工具策略历史独立存于 `~/.dsh/plugins/subscriptions/provider-settings.json`（权限 0600），不受五分钟模型发现缓存过期影响。原有非空 `models.<provider>` 配置仍决定基础目录；界面显示选择在该目录上生效。
+
+### 编辑模型的默认推理档
+
+默认推理档已合并进 **编辑模型列表**：每个支持推理档的模型在同一处配置显示、推理档和上下文，统一点击 **保存更改** 后生效。隐藏模型也可以设置推理档；没有推理档的模型不显示下拉框。选择「跟随服务商」清除覆盖，取消会恢复尚未保存的编辑。选项取自模型实时能力目录，账号池使用成员共同支持的档位；自定义池别名不提供无效的推理档覆盖。
+
+原有推理档配置继续从 `~/.dsh/plugins/subscriptions/model-defaults.json`（权限 0600）读取并保存。若保存中途失败，界面会保留未完成的草稿，明确提示已经保存的推理档，并可重试完成。
 
 ## 配置
 
@@ -215,9 +247,17 @@ tools+effort 的自动改道。
 
 ## 代理
 
-所有订阅相关请求 —— token 交换、模型 API 流式调用、用量查询、模型目录发现,以及 `x_search` / `image_generate` / `video_generate` 工具 —— 都可以通过 HTTP(S) 代理发出。在 **设置 → 订阅 → 代理 → 配置…** 中设置:勾选启用,填写代理地址(`http://127.0.0.1:7890`)、可选用户名/密码,以及可选的逗号分隔绕过列表(保持直连的主机名,如 `127.0.0.1`、`localhost`、`*.example.com`)。密码保存在 `~/.dsh/plugins/subscriptions/proxy.json`(权限 0600),不会回传给浏览器;「测试」按钮会用当前配置探测一次端点,显示 HTTP 状态码与耗时。
+DSH `v0.1.3-alpha.1` 新增宿主统一代理支持。建议在启动环境或 `$DSH_HOME/.env` 中配置 `HTTP_PROXY` / `HTTPS_PROXY`(或 `ALL_PROXY`)以及 `NO_PROXY`,重启 DSH,然后**关闭插件代理**。参见 [DSH 网络代理指南](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.1.3-alpha.1/docs/user/guide/network-proxy.zh.md)。环境变量中的代理凭据会被子命令继承,与插件私有配置文件的凭据边界不同;不会自动删除或迁移已有设置。
+
+插件代理作为可选覆盖设置保留,用于仍受支持的旧版 DSH 以及仅订阅请求使用独立代理的场景。所有订阅相关请求 —— token 交换、模型 API 流式调用、用量查询、模型目录发现,以及 `x_search` / `image_generate` / `video_generate` 工具 —— 都可以使用。在 **设置 → 订阅 → 代理 → 配置…** 中设置:勾选启用,填写代理地址(`http://127.0.0.1:7890`)、可选用户名/密码,以及可选的逗号分隔绕过列表(如 `127.0.0.1`、`localhost`、`*.example.com`)。关闭或绕过插件代理后使用 DSH 的全局 fetch 路由,**不一定直连**;要求直连时还应配置宿主的 `NO_PROXY`。密码保存在 `~/.dsh/plugins/subscriptions/proxy.json`(权限 0600),不会回传给浏览器;「测试」按钮会用当前配置探测一次端点,显示 HTTP 状态码与耗时。
 
 保存后立即对后续请求生效,无需重启。OAuth 授权页在浏览器中打开,走浏览器/系统自身的代理设置,不受此配置影响;不支持 socks 代理。
+
+## 相关插件
+
+本插件只提供模型路由,审批策略由其他插件负责:
+
+- [`dsh-plugin-auto-review`](https://github.com/delef/dsh-plugin-auto-review) —— 面向 DSH 工具审批的 provider 原生自动审查。它在本插件注册的 `codex` / `grok` 路由(或其他 DSH LLM adapter 的兼容路由)之上,通过 `ctx.llm.stream()` 复现 Codex Guardian 与 Grok 提权审查逻辑,不接触账号与凭据。安装:`dsh plugin --profile web add dsh-plugin-auto-review`。
 
 ## 开发
 

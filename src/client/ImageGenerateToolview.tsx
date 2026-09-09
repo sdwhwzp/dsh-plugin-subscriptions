@@ -4,7 +4,7 @@
  * and after settling; a settled result with image blocks renders them through
  * this plugin's own ImageGallery (harness rc.8 stopped exporting the platform
  * one as a package value), whose bytes load through the node half's
- * `subscriptionsAuth` Remote namespace (the durable ImageAttachmentRef is never
+ * `/subscriptions-auth` RPC channel (the durable ImageAttachmentRef is never
  * a fetchable URL on its own). A text-only settled result (degraded route)
  * renders its text; an error result renders the first error line.
  *
@@ -14,14 +14,16 @@
  * structurally (same discipline as platform-modules.d.ts).
  */
 import type { CSSProperties } from 'react'
-import type { ToolCallBlock } from '@deepseek-ai/dsh-client-ui-chat/client'
+import type { ConnectionHandle, RpcResult } from '@deepseek-ai/dsh-api-remotes/client'
+import type { ToolCallBlock } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { IconSparkle16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { ImageGallery } from './ImageGallery.js'
 import type { ImageAttachmentRef, ImageLoader, MessageImageLabels } from './ImageGallery.js'
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
-import { callSubscriptionsAuth } from './SubscriptionsSection.js'
-import type { SubscriptionsAuthClient } from './SubscriptionsSection.js'
+
+/** Logical RPC channel served by the node half of this plugin. */
+const SUBSCRIPTIONS_AUTH_CHANNEL = '/subscriptions-auth'
 
 /** Title prompt truncation budget (characters). */
 const PROMPT_MAX_LENGTH = 60
@@ -32,7 +34,6 @@ interface ToolCallOwnerProps {
   toolName: string
   block: ToolCallBlock
   cwd?: string | undefined
-  home?: string | undefined
   openFile: (path: string) => void
   inspect?: (() => void) | undefined
 }
@@ -46,7 +47,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 
 /** Injected dependencies of {@link ImageGenerateToolview} (slot `inject`). */
 export interface ImageGenerateToolviewInjected {
-  /** Session-authorized image URL loader riding API Gateway. */
+  /** Session-authorized image URL loader riding the `/subscriptions-auth` channel. */
   load: ImageLoader
 }
 
@@ -66,15 +67,28 @@ interface ImageEndpointResult {
 }
 
 /**
+ * Call one `/subscriptions-auth` endpoint and unwrap the business result.
+ * @param rpc - Connection RPC caller.
+ * @param endpoint - channel-relative endpoint.
+ * @param payload - channel-owned request payload.
+ * @returns the success value, cast by the caller to the endpoint's shape.
+ */
+async function callSubscriptionsAuth<T>(rpc: ConnectionHandle['rpc'], endpoint: string, payload: unknown): Promise<T> {
+  const result: RpcResult<unknown> = await rpc.call(SUBSCRIPTIONS_AUTH_CHANNEL, endpoint, payload)
+  if (!result.ok) throw new Error(result.error.message)
+  return result.value as T
+}
+
+/**
  * Build the ImageGallery loader over the `image` endpoint.
- * @param remote - generated subscriptions-auth Remote namespace.
+ * @param rpc - Connection RPC caller.
  * @returns loader resolving an attachment ref to a data URL.
  */
-export function createImageLoader(remote: SubscriptionsAuthClient): ImageLoader {
+export function createImageLoader(rpc: ConnectionHandle['rpc']): ImageLoader {
   // The host validates a full ImageAttachmentRef payload (readImage takes the
   // whole ref), so forward the attachment verbatim.
   return attachment =>
-    callSubscriptionsAuth<ImageEndpointResult>(remote, 'image', { ...attachment })
+    callSubscriptionsAuth<ImageEndpointResult>(rpc, 'image', { ...attachment })
       .then(result => `data:${result.mediaType};base64,${result.dataBase64}`)
 }
 
@@ -164,7 +178,12 @@ export function ImageGenerateToolview(props: ImageGenerateToolviewProps) {
   if (block === undefined) return null
   const settled = 'kind' in block
   const argsRaw = (settled ? block.call?.argsRaw : block.argsRaw) ?? ''
-  const title = `image_generate: ${derivePrompt(argsRaw)}`
+  let references = 0
+  try {
+    const args = JSON.parse(argsRaw)
+    if (Array.isArray(args?.referenceImages)) references = args.referenceImages.length
+  } catch { /* Arguments may still be streaming. */ }
+  const title = `image_generate${references > 0 ? ` (${references} ref)` : ''}: ${derivePrompt(argsRaw)}`
   const images = resultImages(block)
   const text = settled ? resultText(block) : ''
   const labels: MessageImageLabels = {

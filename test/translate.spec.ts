@@ -24,7 +24,8 @@ import {
   toAnthropicTools,
 } from '../src/translate/anthropic.js'
 import type { AnthropicMessage, AnthropicStreamEvent } from '../src/translate/anthropic.js'
-import { resolveImages } from '../src/translate/resolved.js'
+import { resolveImages, type TranslatableMessage } from '../src/translate/resolved.js'
+import { toChatMessages } from '../src/translate/chat-completions.js'
 
 let messageCounter = 0
 
@@ -75,40 +76,6 @@ test('toResponsesInput: text, tool call, and tool result round trip', () => {
     { type: 'function_call', call_id: 'call-1', name: 'bash', arguments: '{"cmd":"ls"}' },
     { type: 'function_call_output', call_id: 'call-1', output: 'file-a\nfile-b' },
   ])
-})
-
-test('toResponsesInput: long tool call ids are shortened and preserve result pairing', () => {
-  const longCallId = 'call_1AMlFpwK2lhf324QHBWwQCTmR8WYQc1z|fc_1AMlFpwK2lhf324QHBWwQCTmR8WYQc1z'
-  const { input } = toResponsesInput([
-    message('assistant', [toolCall(longCallId, 'bash', '{"cmd":"pwd"}')]),
-    message('user', [toolResult(longCallId, '/workspace')], { kind: 'tool', callId: ToolCallId(longCallId) }),
-  ])
-
-  const callId = input[0].call_id
-  assert.equal(typeof callId, 'string')
-  assert.match(callId as string, /^dsh_[A-Za-z0-9_-]{43}$/)
-  assert.ok((callId as string).length <= 64)
-  assert.equal(input[1].call_id, callId)
-})
-
-test('toResponsesInput: generated call ids cannot collide with existing short ids', () => {
-  const longCallId = 'x'.repeat(65)
-  const generatedCallId = toResponsesInput([
-    message('assistant', [toolCall(longCallId, 'first', '{}')]),
-  ]).input[0].call_id as string
-
-  const { input } = toResponsesInput([
-    message('assistant', [
-      toolCall(generatedCallId, 'reserved', '{}'),
-      toolCall(longCallId, 'long', '{}'),
-    ]),
-    message('user', [toolResult(longCallId, 'done')], { kind: 'tool', callId: ToolCallId(longCallId) }),
-  ])
-
-  assert.equal(input[0].call_id, generatedCallId)
-  assert.notEqual(input[1].call_id, generatedCallId)
-  assert.equal(input[2].call_id, input[1].call_id)
-  assert.ok((input[1].call_id as string).length <= 64)
 })
 
 test('toResponsesInput: system-role messages become instructions unless options.system wins', () => {
@@ -183,8 +150,8 @@ test('toResponsesInput: reasoningFor replays completed reasoning items ahead of 
 })
 
 test('toResponsesTools maps to Responses function tools', () => {
-  assert.deepEqual(toResponsesTools([{ name: 'bash', description: 'run', parameters: { type: 'object' } }]), [
-    { type: 'function', name: 'bash', description: 'run', parameters: { type: 'object' } },
+  assert.deepEqual(toResponsesTools([{ name: 'bash', description: 'run', parameters: { type: 'object' } }], { strict: false }), [
+    { type: 'function', name: 'bash', description: 'run', parameters: { type: 'object' }, strict: false },
   ])
 })
 
@@ -229,7 +196,73 @@ test('resolveImages: passthrough, loud failure without attachments, and resoluti
     readImage: (ref: unknown) => Promise.resolve({ ref, data: new Uint8Array([104, 105]) }),
   } as never
   const resolved = await resolveImages(withImage, attachments)
-  assert.deepEqual(resolved[0].content, [{ type: 'image', mediaType: 'image/png', dataBase64: 'aGk=' }])
+  assert.deepEqual(resolved[0].content[0], { type: 'image', mediaType: 'image/png', dataBase64: 'aGk=' })
+  assert.match((resolved[0].content[1] as { text: string }).text, /image_generate.referenceImages/)
+  assert.match((resolved[0].content[1] as { text: string }).text, /"attachmentId":"a1"/)
+})
+
+test('tool-result images: resolve attachments and retain parallel results before image follow-up', async () => {
+  const ref = { attachmentId: 'tool-image', mediaType: 'image/png', bytes: 2, width: 1, height: 1 }
+  const messages = [
+    message('assistant', ['a', 'b'].map(id => ({ type: 'tool-call', id: ToolCallId(id), name: 'read_image', arguments: '{}' }))),
+    ...['a', 'b'].map(id => message('user', [{
+      type: 'tool-result', toolCallId: ToolCallId(id), isError: false,
+      content: [{ type: 'text', text: id }, { type: 'image', attachment: ref } as never],
+    }])),
+  ]
+  const before = structuredClone(messages)
+  const signal = new AbortController().signal
+  let reads = 0
+  const resolved = await resolveImages(messages, {
+    readImage: async (attachment: unknown, actualSignal: unknown) => {
+      assert.equal(attachment, ref)
+      assert.equal(actualSignal, signal)
+      reads++
+      return { ref, data: new Uint8Array([104, 105]) }
+    },
+  } as never, signal)
+  assert.equal(reads, 2)
+  assert.deepEqual(messages, before, 'must not mutate stored history')
+  const anthropic = toAnthropicMessages(resolved)
+  for (const result of anthropic[1].content) {
+    assert.equal(result.type, 'tool_result')
+    assert.deepEqual((result.content as unknown[])[1], {
+      type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aGk=' },
+    })
+  }
+  const responses = toResponsesInput(resolved).input
+  assert.deepEqual(responses.map(item => item.type), ['function_call', 'function_call', 'function_call_output', 'function_call_output', 'message'])
+  const responseImages = (responses[4].content as Record<string, unknown>[]).filter(part => part.type === 'input_image')
+  assert.equal(responseImages.length, 2)
+  assert.equal(responseImages[0].image_url, 'data:image/png;base64,aGk=')
+  const chat = toChatMessages(resolved)
+  assert.deepEqual(chat.map(item => item.role), ['assistant', 'tool', 'tool', 'user'])
+  assert.equal((chat[3].content as Record<string, unknown>[]).filter(part => part.type === 'image_url').length, 2)
+  await assert.rejects(() => resolveImages(messages, undefined), (error: unknown) => error instanceof LlmError && error.code === 'UNSUPPORTED')
+  await assert.rejects(() => resolveImages(messages, { readImage: async () => { throw new Error('read failed') } } as never), /read failed/)
+})
+
+test('tool-result images: image-only errors, multiple images and separate turns retain their content', () => {
+  const image = { type: 'image' as const, mediaType: 'image/jpeg', dataBase64: 'aGk=' }
+  const messages: TranslatableMessage[] = [
+    { role: 'user', content: [{ type: 'tool-result', toolCallId: ToolCallId('first'), isError: true, content: [image, image] }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'first image seen' }] },
+    { role: 'user', content: [{ type: 'tool-result', toolCallId: ToolCallId('second'), content: [{ type: 'text', text: 'caption' }, image] }] },
+  ]
+  const anthropic = toAnthropicMessages(messages)
+  assert.equal(anthropic[0].content[0].is_error, true)
+  assert.equal((anthropic[0].content[0].content as unknown[]).length, 2)
+  const responses = toResponsesInput(messages).input
+  assert.equal(responses[0].output, '', 'image-only result still answers its tool call')
+  assert.equal((responses[1].content as unknown[]).length, 3, 'label followed by two images')
+  assert.equal(responses[2].role, 'assistant')
+  assert.equal(responses[3].output, 'caption')
+  assert.equal((responses[4].content as unknown[]).length, 2)
+  const chat = toChatMessages(messages)
+  assert.deepEqual(chat.map(item => item.role), ['tool', 'user', 'assistant', 'tool', 'user'])
+  assert.deepEqual((chat[1].content as Record<string, unknown>[])[1], {
+    type: 'image_url', image_url: { url: 'data:image/jpeg;base64,aGk=' },
+  })
 })
 
 test('Responses translator: text + tool call stream yields usage before finish', () => {

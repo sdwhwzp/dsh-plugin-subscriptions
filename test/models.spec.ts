@@ -7,9 +7,10 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import './keep-alive.js'
 import { MessageId, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { Message } from '@deepseek-ai/dsh-llm'
-import { CODEX_CLIENT_VERSION, CodexAdapter, codexRequestBody, fetchCodexModels } from '../src/providers/codex.js'
+import { CodexAdapter, codexRequestBody, fetchCodexModels } from '../src/providers/codex.js'
 import { GrokAdapter } from '../src/providers/grok.js'
 import { ClaudeAdapter, claudeRequestBody } from '../src/providers/claude.js'
 import { CopilotAdapter, fetchCopilotModels } from '../src/providers/copilot.js'
@@ -19,9 +20,32 @@ import type { CatalogPersistence, CatalogSnapshot, FetchFn } from '../src/provid
 import type { ClaudeSession, CodexSession, CopilotSession, GrokSession } from '../src/auth/store.js'
 import { withTimeout } from '../src/providers/common.js'
 
-const STATIC_CODEX = [{ id: 'gpt-5.6-sol', name: 'GPT-5.1 Codex' }]
+const STATIC_CODEX = [{ id: 'gpt-5.1-codex', name: 'GPT-5.1 Codex' }]
 const STATIC_CLAUDE = [{ id: 'claude-opus-4-5', name: 'Claude Opus 4.5' }]
-const STATIC_GROK = [{ id: 'grok-4.6', name: 'Grok 4.6' }]
+const STATIC_GROK = [{ id: 'grok-4', name: 'Grok 4' }]
+
+test('Codex context overrides clamp per account, restore defaults, and distrust missing maxima', async () => {
+  let requested: number | undefined = 512_000
+  const sessions = {
+    pro: { accessToken: 'pro', refreshToken: 'r', accountId: 'pro', expiresAt: Date.now() + 3600000 },
+    plus: { accessToken: 'plus', refreshToken: 'r', accountId: 'plus', expiresAt: Date.now() + 3600000 },
+  }
+  const adapter = new CodexAdapter({
+    models: [], discovery: true, tokens: memoryAccounts(sessions), streamIdleTimeoutMs: 1000,
+    contextWindowOf: () => requested,
+    fetchFn: (async (_url, init) => new Response(JSON.stringify({ models: [
+      { slug: 'm', context_window: 272000, max_context_window: new Headers(init?.headers).get('chatgpt-account-id') === 'pro' ? 872000 : 300000 },
+      { slug: 'unknown-max', context_window: 272000 },
+    ] }))) as FetchFn,
+  })
+  assert.equal((await adapter.resolveOwnModel('codex', 'm', 'pro')).context?.contextWindow, 512000)
+  assert.equal((await adapter.resolveOwnModel('codex', 'm', 'plus')).context?.contextWindow, 300000)
+  assert.equal((await adapter.resolveOwnModel('codex', 'unknown-max', 'pro')).context?.contextWindow, 272000)
+  requested = undefined
+  assert.equal((await adapter.resolveOwnModel('codex', 'm', 'pro')).context?.contextWindow, 272000)
+  requested = 128000
+  assert.equal((await adapter.resolveOwnModel('codex', 'm', 'pro')).context?.contextWindow, 128000)
+})
 
 const codexSession: CodexSession = {
   accessToken: 'at',
@@ -138,7 +162,7 @@ function codexAdapter(overrides: {
 const CODEX_MODELS_PAYLOAD = {
   models: [
     {
-      slug: 'gpt-5.6-terra',
+      slug: 'gpt-5.2-codex',
       display_name: 'GPT-5.2 Codex',
       description: 'newest',
       context_window: 500_000,
@@ -151,7 +175,7 @@ const CODEX_MODELS_PAYLOAD = {
       priority: 2,
     },
     {
-      slug: 'gpt-5.6-sol',
+      slug: 'gpt-5.1-codex',
       display_name: 'GPT-5.1 Codex',
       visibility: 'list',
       priority: 1,
@@ -181,11 +205,67 @@ test('listModels returns [] when logged out (codex, claude, grok)', async () => 
   assert.deepEqual(await grok.listModels('grok'), [])
 })
 
+test('codex catalog version gates GPT-6 and supports an explicit compatibility override', async () => {
+  const seen: string[] = []
+  const fetchFn: FetchFn = async (input) => {
+    const version = new URL(String(input)).searchParams.get('client_version') ?? ''
+    seen.push(version)
+    return new Response(JSON.stringify({ models: version === '0.147.0'
+      ? [{ slug: 'gpt-5.6-sol' }]
+      : [{ slug: 'gpt-6-astra', visibility: 'list', supported_reasoning_levels: [{ effort: 'max' }] }, { slug: 'hidden', visibility: 'hide' }],
+    }))
+  }
+  assert.deepEqual((await fetchCodexModels(codexSession, fetchFn)).map(model => model.id), ['gpt-6-astra'])
+  assert.deepEqual((await fetchCodexModels(codexSession, fetchFn, undefined, '0.147.0')).map(model => model.id), ['gpt-5.6-sol'])
+  assert.deepEqual(seen, ['0.153.4', '0.147.0'])
+  await assert.rejects(() => fetchCodexModels(codexSession, fetchFn, undefined, '0.153.4&bad=1'), /codexClientVersion/)
+  assert.equal(seen.length, 2, 'invalid versions must not reach the network')
+})
+
+test('codex catalog refresh invalidates all accounts and preserves configured version', async () => {
+  let fresh = false
+  const calls: string[] = []
+  const adapter = new CodexAdapter({
+    models: STATIC_CODEX, streamIdleTimeoutMs: 1000, discovery: true,
+    clientVersion: '0.154.0-alpha.3',
+    resolveClientVersion: async () => { throw new Error('explicit version must bypass lookup') },
+    tokens: memoryAccounts({ first: codexSession, second: { ...codexSession, accountId: 'second' } }),
+    fetchFn: async (input) => {
+      assert.equal(new URL(String(input)).searchParams.get('client_version'), '0.154.0-alpha.3')
+      calls.push(String(input))
+      return new Response(JSON.stringify({ models: [{ slug: fresh ? 'gpt-6-astra' : 'gpt-5.6-sol' }] }))
+    },
+  })
+  assert.deepEqual((await adapter.listModels('codex')).map(model => model.id), ['gpt-5.6-sol'])
+  fresh = true
+  assert.deepEqual((await adapter.listModels('codex')).map(model => model.id), ['gpt-5.6-sol'])
+  assert.equal(calls.length, 2)
+  adapter.clearAccountCatalog()
+  assert.deepEqual((await adapter.listModels('codex')).map(model => model.id), ['gpt-6-astra'])
+  assert.equal(calls.length, 4, 'both accounts are fetched again within the TTL')
+})
+
+test('codex adapter uses the automatic compatibility version for catalog requests', async () => {
+  let lookups = 0
+  const adapter = new CodexAdapter({
+    models: STATIC_CODEX, streamIdleTimeoutMs: 1000, discovery: true,
+    tokens: memoryTokens(codexSession),
+    resolveClientVersion: async () => { lookups++; return '0.155.0' },
+    fetchFn: async (input) => {
+      assert.equal(new URL(String(input)).searchParams.get('client_version'), '0.155.0')
+      return Response.json({ models: [{ slug: 'gpt-6-astra' }] })
+    },
+  })
+  assert.deepEqual((await adapter.listModels('codex')).map(model => model.id), ['gpt-6-astra'])
+  await adapter.listModels('codex')
+  assert.equal(lookups, 1, 'a cached model list needs no version lookup')
+})
+
 test('codex discovery maps, filters hidden entries, and sorts by priority', async () => {
   const { fetchFn, calls } = fakeFetch(CODEX_MODELS_PAYLOAD)
   const adapter = codexAdapter({ session: codexSession, fetchFn })
   const models = await adapter.listModels('codex')
-  assert.deepEqual(models.map(model => model.id), ['gpt-5.6-sol', 'gpt-5.6-terra'])
+  assert.deepEqual(models.map(model => model.id), ['gpt-5.1-codex', 'gpt-5.2-codex'])
   assert.equal(models[1].name, 'GPT-5.2 Codex')
   assert.equal(models[1].description, 'newest')
   // The TTL cache serves the second call without another fetch.
@@ -193,39 +273,11 @@ test('codex discovery maps, filters hidden entries, and sorts by priority', asyn
   assert.equal(calls(), 1)
 })
 
-test('codex discovery resolves new models with their text-only, reasoning, and speed capabilities', async () => {
-  const { fetchFn, calls } = fakeFetch({
-    models: [{
-      slug: 'future-codex-model',
-      display_name: 'Future Codex Model',
-      visibility: 'list',
-      input_modalities: ['text'],
-      context_window: 128_000,
-      supported_reasoning_levels: [{ effort: 'low' }, { effort: 'high' }],
-      default_reasoning_level: 'low',
-      service_tiers: [{ id: 'priority' }],
-    }],
-  })
-  const adapter = codexAdapter({ session: codexSession, fetchFn })
-  const resolved = await adapter.resolveOwnModel('codex', 'future-codex-model')
-  assert.equal(resolved.name, 'Future Codex Model')
-  assert.equal(resolved.context?.contextWindow, 128_000)
-  assert.deepEqual(resolved.inputModalities, ['text'])
-  assert.deepEqual(resolved.reasoning?.efforts.map(effort => effort.id), ['low', 'high'])
-  assert.equal(resolved.reasoning?.defaultEffort, 'low')
-  assert.equal(await adapter.supportsFastTier('future-codex-model'), true)
-  assert.deepEqual(await adapter.fastCapableModels(), ['future-codex-model'])
-  const models = await adapter.listModels('codex')
-  assert.deepEqual(models.map(model => model.id), ['future-codex-model'])
-  assert.deepEqual(models[0].inputModalities, ['text'])
-  assert.equal(calls(), 1)
-})
-
 test('resolveModel prefers discovered context window and reasoning efforts', async () => {
   const { fetchFn } = fakeFetch(CODEX_MODELS_PAYLOAD)
   const adapter = codexAdapter({ session: codexSession, fetchFn })
   await adapter.listModels('codex')
-  const resolved = await adapter.resolveModel('codex', 'gpt-5.6-terra')
+  const resolved = await adapter.resolveModel('codex', 'gpt-5.2-codex')
   assert.equal(resolved.context?.contextWindow, 500_000)
   assert.deepEqual(
     resolved.reasoning?.efforts.map(effort => effort.id),
@@ -243,14 +295,14 @@ test('a configured default effort wins over the discovered one (codex)', async (
   const adapter = codexAdapter({
     session: codexSession,
     fetchFn,
-    defaultEffortOf: model => model === 'gpt-5.6-terra' ? 'low' : undefined,
+    defaultEffortOf: model => model === 'gpt-5.2-codex' ? 'low' : undefined,
   })
   await adapter.listModels('codex')
-  const resolved = await adapter.resolveModel('codex', 'gpt-5.6-terra')
+  const resolved = await adapter.resolveModel('codex', 'gpt-5.2-codex')
   assert.equal(resolved.reasoning?.defaultEffort, 'low')
   assert.deepEqual(resolved.reasoning?.efforts.map(effort => effort.id), ['low', 'high'])
   // Unconfigured models keep the built-in default, untouched by the override.
-  const other = await adapter.resolveModel('codex', 'gpt-5.6-sol')
+  const other = await adapter.resolveModel('codex', 'gpt-5.1-codex')
   assert.equal(other.reasoning?.defaultEffort, 'high')
 })
 
@@ -265,7 +317,7 @@ test('a configured default the discovered catalog dropped does not reach the wir
     defaultEffortOf: () => 'max',
   })
   await adapter.listModels('codex')
-  const resolved = await adapter.resolveModel('codex', 'gpt-5.6-terra')
+  const resolved = await adapter.resolveModel('codex', 'gpt-5.2-codex')
   assert.deepEqual(resolved.reasoning?.efforts.map(effort => effort.id), ['low', 'high'],
     'an unadvertised level is not invented into the capability set')
   assert.equal(resolved.reasoning?.defaultEffort, 'high', 'the discovered default stands')
@@ -281,7 +333,7 @@ test('a configured default extends only the built-in fallback list (codex)', asy
     discovery: false,
     defaultEffortOf: () => 'ultra',
   })
-  const resolved = await adapter.resolveModel('codex', 'gpt-5.6-terra')
+  const resolved = await adapter.resolveModel('codex', 'gpt-5.2-codex')
   const ids: string[] = (resolved.reasoning?.efforts ?? []).map(effort => String(effort.id))
   assert.ok(ids.includes('ultra'), 'the configured level joins the fallback set')
   assert.equal(resolved.reasoning?.defaultEffort, 'ultra')
@@ -316,7 +368,7 @@ test('codex discovery failure falls back to the static catalog with a warning', 
   const { fetchFn } = fakeFetch({ error: 'boom' }, 500)
   const adapter = codexAdapter({ session: codexSession, fetchFn, warnings })
   const models = await adapter.listModels('codex')
-  assert.deepEqual(models.map(model => model.id), ['gpt-5.6-sol'])
+  assert.deepEqual(models.map(model => model.id), ['gpt-5.1-codex'])
   assert.equal(warnings.length, 1)
   assert.match(warnings[0], /codex model discovery failed/)
 })
@@ -325,37 +377,12 @@ test('codex config override wins over discovery entirely', async () => {
   const { fetchFn, calls } = fakeFetch(CODEX_MODELS_PAYLOAD)
   const adapter = codexAdapter({ session: codexSession, fetchFn, discovery: false })
   const models = await adapter.listModels('codex')
-  assert.deepEqual(models.map(model => model.id), ['gpt-5.6-sol'])
+  assert.deepEqual(models.map(model => model.id), ['gpt-5.1-codex'])
   assert.equal(calls(), 0)
 })
 
-test('codex manual catalogs retain models outside the built-in fallback', async () => {
-  const { fetchFn, calls } = fakeFetch(CODEX_MODELS_PAYLOAD)
-  const adapter = new CodexAdapter({
-    models: [{ id: 'custom-codex', name: 'Custom Codex', inputModalities: ['text'], contextWindow: 64_000 }],
-    streamIdleTimeoutMs: 1000,
-    tokens: memoryTokens(codexSession),
-    discovery: false,
-    fetchFn,
-  })
-  assert.deepEqual((await adapter.listModels('codex')).map(model => model.id), ['custom-codex'])
-  const resolved = await adapter.resolveModel('codex', 'custom-codex')
-  assert.equal(resolved.name, 'Custom Codex')
-  assert.equal(resolved.context?.contextWindow, 64_000)
-  assert.deepEqual(resolved.inputModalities, ['text'])
-  assert.equal(calls(), 0)
-})
-
-test('grok discovery keeps only Grok 4.6 and Grok 4.5', async () => {
-  const { fetchFn } = fakeFetch({
-    data: [
-      { id: 'grok-4.6' },
-      { id: 'grok-4.5' },
-      { id: 'grok-4.20' },
-      { id: 'grok-build-0.1' },
-      { nope: true },
-    ],
-  })
+test('grok discovery maps the data array', async () => {
+  const { fetchFn } = fakeFetch({ data: [{ id: 'grok-4-1' }, { id: 'grok-code-2' }, { nope: true }] })
   const adapter = new GrokAdapter({
     models: STATIC_GROK,
     streamIdleTimeoutMs: 1000,
@@ -364,36 +391,7 @@ test('grok discovery keeps only Grok 4.6 and Grok 4.5', async () => {
     fetchFn,
   })
   const models = await adapter.listModels('grok')
-  assert.deepEqual(models.map(model => model.id), ['grok-4.6', 'grok-4.5'])
-})
-
-test('grok configured catalog keeps only Grok 4.6 and Grok 4.5', async () => {
-  const adapter = new GrokAdapter({
-    models: [
-      { id: 'grok-build-0.1' },
-      { id: 'grok-4.5', name: 'Grok 4.5' },
-      { id: 'grok-4.6', name: 'Grok 4.6' },
-    ],
-    streamIdleTimeoutMs: 1000,
-    tokens: memoryTokens(grokSession),
-    discovery: false,
-  })
-  assert.deepEqual((await adapter.listModels('grok')).map(model => model.id), ['grok-4.5', 'grok-4.6'])
-})
-
-test('grok rejects restored or crafted models outside the customer allowlist', async () => {
-  const adapter = new GrokAdapter({
-    models: STATIC_GROK,
-    streamIdleTimeoutMs: 1000,
-    tokens: memoryTokens(grokSession),
-    discovery: false,
-  })
-  await assert.rejects(
-    adapter.resolveModel('grok', 'grok-build-0.1'),
-    { code: 'UNKNOWN_MODEL' },
-  )
-  const stream = adapter.stream({ provider: 'grok', model: 'grok-build-0.1', messages: [] })
-  await assert.rejects(stream[Symbol.asyncIterator]().next(), { code: 'UNKNOWN_MODEL' })
+  assert.deepEqual(models.map(model => model.id), ['grok-4-1', 'grok-code-2'])
 })
 
 test('claude logged in returns the static catalog', async () => {
@@ -409,78 +407,43 @@ test('claude logged in returns the static catalog', async () => {
 
 test('fetchCodexModels tolerates entries without visibility or priority', async () => {
   const models = await fetchCodexModels(codexSession, fakeFetch({
-    models: [{ slug: 'gpt-5.6-sol', display_name: 'Sol' }],
+    models: [{ slug: 'bare', display_name: 'Bare' }],
   }).fetchFn)
-  assert.deepEqual(models, [{ id: 'gpt-5.6-sol', name: 'Sol' }])
-})
-
-test('fetchCodexModels excludes newer client requirements and tolerates unrecognized versions', async () => {
-  const [major, minor, patch] = CODEX_CLIENT_VERSION.split('.').map(Number)
-  const entries = [
-    { slug: 'same-version', minimal_client_version: CODEX_CLIENT_VERSION },
-    { slug: 'short-version', minimal_client_version: `${major}.${minor}` },
-    { slug: 'padded-version', minimal_client_version: `${CODEX_CLIENT_VERSION}.0` },
-    { slug: 'older-version', minimal_client_version: '0.0.0' },
-    { slug: 'missing-version' },
-    { slug: 'null-version', minimal_client_version: null },
-    { slug: 'invalid-version', minimal_client_version: '999bad.0.0' },
-    { slug: 'newer-patch', minimal_client_version: `${major}.${minor}.${patch + 1}` },
-    { slug: 'newer-minor', minimal_client_version: `${major}.${minor + 1}.0` },
-    { slug: 'newer-major', minimal_client_version: `${major + 1}.0.0` },
-  ]
-  const models = await fetchCodexModels(codexSession, fakeFetch({ models: entries }).fetchFn)
-  assert.deepEqual(models.map(model => model.id), entries.slice(0, 7).map(entry => entry.slug))
-})
-
-test('fetchCodexModels excludes inputs the harness cannot represent without claiming vision support', async () => {
-  const models = await fetchCodexModels(codexSession, fakeFetch({
-    models: [
-      { slug: 'text-only', input_modalities: ['text'] },
-      { slug: 'vision', input_modalities: ['image', 'text', 'image', 'audio'] },
-      { slug: 'unspecified' },
-      { slug: 'audio-only', input_modalities: ['audio'] },
-      { slug: 'no-inputs', input_modalities: [] },
-    ],
-  }).fetchFn)
-  assert.deepEqual(models, [
-    { id: 'text-only', name: 'text-only', inputModalities: ['text'] },
-    { id: 'vision', name: 'vision', inputModalities: ['text', 'image'] },
-    { id: 'unspecified', name: 'unspecified' },
-  ])
+  assert.deepEqual(models, [{ id: 'bare', name: 'Bare' }])
 })
 
 test('codex discovery flags models whose catalog advertises a fast service tier', async () => {
   const models = await fetchCodexModels(codexSession, fakeFetch({
     models: [
       {
-        slug: 'gpt-5.6-terra',
+        slug: 'gpt-5.2-codex',
         display_name: 'GPT-5.2 Codex',
         service_tiers: [{ id: 'priority', name: 'Fast', description: 'Priority processing.' }],
         priority: 1,
       },
       // The legacy catalog spelling (codex-rs additional_speed_tiers).
-      { slug: 'gpt-5.6-luna', display_name: 'Spark', additional_speed_tiers: ['fast'], priority: 2 },
+      { slug: 'gpt-5.2-codex-spark', display_name: 'Spark', additional_speed_tiers: ['fast'], priority: 2 },
       // A model without a fast tier gets no flag.
-      { slug: 'gpt-5.6-sol', display_name: 'GPT-5.1 Codex', priority: 3 },
+      { slug: 'gpt-5.1-codex', display_name: 'GPT-5.1 Codex', priority: 3 },
     ],
   }).fetchFn)
-  assert.deepEqual(models.map(model => model.id), ['gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.6-sol'])
+  assert.deepEqual(models.map(model => model.id), ['gpt-5.2-codex', 'gpt-5.2-codex-spark', 'gpt-5.1-codex'])
   assert.deepEqual(models.map(model => model.fastTier ?? false), [true, true, false])
 
   const { fetchFn } = fakeFetch({
     models: [
-      { slug: 'gpt-5.6-terra', service_tiers: [{ id: 'priority' }], priority: 1 },
-      { slug: 'gpt-5.6-sol', priority: 2 },
+      { slug: 'gpt-5.2-codex', service_tiers: [{ id: 'priority' }], priority: 1 },
+      { slug: 'gpt-5.1-codex', priority: 2 },
     ],
   })
   const adapter = codexAdapter({ session: codexSession, fetchFn })
-  assert.deepEqual(await adapter.fastCapableModels(), ['gpt-5.6-terra'])
-  assert.equal(await adapter.supportsFastTier('gpt-5.6-terra'), true)
-  assert.equal(await adapter.supportsFastTier('gpt-5.6-sol'), false)
+  assert.deepEqual(await adapter.fastCapableModels(), ['gpt-5.2-codex'])
+  assert.equal(await adapter.supportsFastTier('gpt-5.2-codex'), true)
+  assert.equal(await adapter.supportsFastTier('gpt-5.1-codex'), false)
   // Discovery off (config override): no fast capability is claimed.
   const staticAdapter = codexAdapter({ session: codexSession, discovery: false })
   assert.deepEqual(await staticAdapter.fastCapableModels(), [])
-  assert.equal(await staticAdapter.supportsFastTier('gpt-5.6-sol'), false)
+  assert.equal(await staticAdapter.supportsFastTier('gpt-5.1-codex'), false)
   // Logged out: no fast models, so the Speed toggle hides after logout.
   const loggedOut = codexAdapter({ fetchFn })
   assert.deepEqual(await loggedOut.fastCapableModels(), [])
@@ -488,26 +451,63 @@ test('codex discovery flags models whose catalog advertises a fast service tier'
 
 test('codexRequestBody sends service_tier priority only on the fast tier', () => {
   const base = codexRequestBody(
-    { provider: 'codex', model: 'gpt-5.6-sol', messages: [] },
+    { provider: 'codex', model: 'gpt-5.1-codex', messages: [] },
     { input: [] },
     false,
   )
-  assert.equal(base.model, 'gpt-5.6-sol')
+  assert.equal(base.model, 'gpt-5.1-codex')
   assert.equal('service_tier' in base, false)
 
   const fast = codexRequestBody(
     {
       provider: 'codex',
-      model: 'gpt-5.6-sol',
+      model: 'gpt-5.1-codex',
       messages: [],
       reasoningEffort: ReasoningEffortId('high'),
     },
     { input: [] },
     true,
   )
-  assert.equal(fast.model, 'gpt-5.6-sol')
+  assert.equal(fast.model, 'gpt-5.1-codex')
   assert.equal(fast.service_tier, 'priority')
   assert.deepEqual(fast.reasoning, { effort: 'high', summary: 'auto' })
+})
+
+test('codexRequestBody reconciles orphaned tool calls before dispatch', () => {
+  const missing = codexRequestBody(
+    { provider: 'codex', model: 'gpt-5.6-sol', messages: [] },
+    {
+      input: [
+        { type: 'function_call', call_id: 'call-missing', name: 'lookup', arguments: '{}' },
+        { type: 'function_call_output', call_id: 'call-orphan', output: 'stale' },
+        { type: 'function_call', call_id: 'call-ok', name: 'read', arguments: '{}' },
+        { type: 'function_call_output', call_id: 'call-ok', output: 'done' },
+      ],
+    },
+    false,
+  )
+  const input = missing.input as Record<string, unknown>[]
+  assert.equal(input.length, 4)
+  assert.equal(input[0].type, 'function_call')
+  assert.equal(input[0].call_id, 'call-missing')
+  assert.equal(input[1].type, 'function_call_output')
+  assert.equal(input[1].call_id, 'call-missing')
+  assert.match(String(input[1].output), /outcome is unknown/)
+  assert.equal(input[2].call_id, 'call-ok')
+  assert.equal(input[3].type, 'function_call_output')
+  assert.equal(input[3].call_id, 'call-ok')
+
+  const balanced = codexRequestBody(
+    { provider: 'codex', model: 'gpt-5.6-sol', messages: [] },
+    {
+      input: [
+        { type: 'function_call', call_id: 'call-1', name: 'lookup', arguments: '{}' },
+        { type: 'function_call_output', call_id: 'call-1', output: 'done' },
+      ],
+    },
+    false,
+  )
+  assert.equal((balanced.input as Record<string, unknown>[]).length, 2)
 })
 
 test('codexRequestBody bounds tool-call ids without losing their pairings', () => {
@@ -525,7 +525,7 @@ test('codexRequestBody bounds tool-call ids without losing their pairings', () =
       { type: 'function_call_output', call_id: longB, output: 'long B result' },
     ],
   }
-  const options = { provider: 'codex', model: 'gpt-5.6-sol', messages: [] }
+  const options = { provider: 'codex', model: 'gpt-5.1-codex', messages: [] }
   const first = codexRequestBody(options, resolved, false)
   const second = codexRequestBody(options, resolved, false)
   const ids = (first.input as Record<string, unknown>[]).map(item => String(item.call_id))
@@ -547,9 +547,13 @@ test('codexRequestBody bounds tool-call ids without losing their pairings', () =
     ],
   }, false)
   const collisionIds = (collision.input as Record<string, unknown>[]).map(item => String(item.call_id))
+  // The orphaned reserved call now carries a repaired output of its own, so
+  // the id pairs are [reserved, reserved] then [hash, hash] instead of the
+  // pre-repair adjacency [reserved, hash, hash].
   assert.equal(collisionIds[0], reserved)
-  assert.equal(collisionIds[1], collisionIds[2])
-  assert.notEqual(collisionIds[1], reserved)
+  assert.equal(collisionIds[1], reserved)
+  assert.equal(collisionIds[2], collisionIds[3])
+  assert.notEqual(collisionIds[0], collisionIds[2])
 })
 
 /** One text-only message of any role, for request-body assembly. */
@@ -612,11 +616,11 @@ test('claudeRequestBody omits tools, thinking and effort when the request carrie
   assert.equal(body.max_tokens, 32_000)
 })
 
-test('modalities: codex, claude, and the allowed Grok models accept image input', async () => {
+test('modalities: codex and claude declare image input; grok gates text-only models', async () => {
   const codex = codexAdapter({ session: codexSession, discovery: false })
   const codexModels = await codex.listModels('codex')
   assert.deepEqual(codexModels[0].inputModalities, ['text', 'image'])
-  const codexResolved = await codex.resolveModel('codex', 'gpt-5.6-sol')
+  const codexResolved = await codex.resolveModel('codex', 'gpt-5.1-codex')
   assert.deepEqual(codexResolved.inputModalities, ['text', 'image'])
 
   const claude = new ClaudeAdapter({
@@ -628,30 +632,31 @@ test('modalities: codex, claude, and the allowed Grok models accept image input'
   assert.deepEqual((await claude.listModels('claude'))[0].inputModalities, ['text', 'image'])
 
   const grok = new GrokAdapter({
-    models: [{ id: 'grok-4.6' }, { id: 'grok-4.5' }],
+    models: [{ id: 'grok-4' }, { id: 'grok-code-fast-1' }, { id: 'grok-embedding-1' }],
     streamIdleTimeoutMs: 1000,
     tokens: memoryTokens(grokSession),
     discovery: false,
   })
   const grokModels = await grok.listModels('grok')
   assert.deepEqual(grokModels[0].inputModalities, ['text', 'image'])
-  assert.deepEqual(grokModels[1].inputModalities, ['text', 'image'])
+  assert.deepEqual(grokModels[1].inputModalities, ['text'])
+  assert.deepEqual(grokModels[2].inputModalities, ['text'])
   assert.deepEqual((await grok.resolveModel('grok', 'grok-4.6')).inputModalities, ['text', 'image'])
-  assert.deepEqual((await grok.resolveModel('grok', 'grok-4.5')).inputModalities, ['text', 'image'])
+  assert.deepEqual((await grok.resolveModel('grok', 'grok-code-fast-1')).inputModalities, ['text'])
 })
 
 test('modalities: config entry inputModalities win over the provider default', async () => {
   const adapter = new CodexAdapter({
-    models: [{ id: 'gpt-5.6-sol', inputModalities: ['text'] }],
+    models: [{ id: 'gpt-5.1-codex', inputModalities: ['text'] }],
     streamIdleTimeoutMs: 1000,
     tokens: memoryTokens(codexSession),
     discovery: false,
   })
   assert.deepEqual((await adapter.listModels('codex'))[0].inputModalities, ['text'])
-  assert.deepEqual((await adapter.resolveModel('codex', 'gpt-5.6-sol')).inputModalities, ['text'])
+  assert.deepEqual((await adapter.resolveModel('codex', 'gpt-5.1-codex')).inputModalities, ['text'])
 })
 
-test('grok discovery drops every model outside the customer allowlist', async () => {
+test('grok discovery drops generation and embedding models', async () => {
   const { fetchFn } = fakeFetch({
     data: [
       { id: 'grok-4.6' },
@@ -670,7 +675,7 @@ test('grok discovery drops every model outside the customer allowlist', async ()
     fetchFn,
   })
   const models = await adapter.listModels('grok')
-  assert.deepEqual(models.map(model => model.id), ['grok-4.6'])
+  assert.deepEqual(models.map(model => model.id), ['grok-4.6', 'grok-build-0.1'])
 })
 
 /** The api.x.ai model list: authoritative for which models exist. */
@@ -731,7 +736,7 @@ test('grok discovery merges CLI-catalog reasoning metadata by model id', async (
     fetchFn: grokDualFetch(),
   })
   const models = await adapter.listModels('grok')
-  assert.deepEqual(models.map(model => model.name), ['Grok 4.6', 'Grok 4.5'])
+  assert.deepEqual(models.map(model => model.name), ['Grok 4.6', 'Grok 4.5', 'grok-build-0.1'])
   assert.equal(models[0].description, 'frontier')
 
   const g46 = await adapter.resolveModel('grok', 'grok-4.6')
@@ -745,6 +750,10 @@ test('grok discovery merges CLI-catalog reasoning metadata by model id', async (
   const g45 = await adapter.resolveModel('grok', 'grok-4.5')
   assert.deepEqual(g45.reasoning?.efforts.map(effort => effort.id), ['high', 'medium', 'low'])
 
+  // A model the CLI catalog does not cover exposes no efforts.
+  const build = await adapter.resolveModel('grok', 'grok-build-0.1')
+  assert.equal(build.reasoning, undefined)
+  assert.equal(build.context?.contextWindow, 256_000)
 })
 
 test('grok discovery survives a CLI catalog failure with a warning', async () => {
@@ -758,7 +767,7 @@ test('grok discovery survives a CLI catalog failure with a warning', async () =>
     onWarn: message => warnings.push(message),
   })
   const models = await adapter.listModels('grok')
-  assert.deepEqual(models.map(model => model.id), ['grok-4.6', 'grok-4.5'])
+  assert.deepEqual(models.map(model => model.id), ['grok-4.6', 'grok-4.5', 'grok-build-0.1'])
   assert.equal(warnings.length, 1)
   assert.match(warnings[0], /CLI catalog fetch failed/)
   assert.equal((await adapter.resolveModel('grok', 'grok-4.6')).reasoning, undefined)
@@ -854,7 +863,7 @@ test('empty discovery payload falls back to the static catalog with a warning', 
   const { fetchFn } = fakeFetch({ models: [] })
   const adapter = codexAdapter({ session: codexSession, fetchFn, warnings })
   const models = await adapter.listModels('codex')
-  assert.deepEqual(models.map(model => model.id), ['gpt-5.6-sol'])
+  assert.deepEqual(models.map(model => model.id), ['gpt-5.1-codex'])
   assert.equal(warnings.length, 1)
   assert.match(warnings[0], /empty catalog/)
 })
@@ -882,82 +891,6 @@ function memoryCatalogStore(initial?: CatalogSnapshot): CatalogPersistence & {
 function settle(): Promise<void> {
   return new Promise(resolve => setImmediate(resolve))
 }
-
-test('codex persisted catalogs retain new models and their capabilities without a fetch', async () => {
-  const store = memoryCatalogStore({
-    at: Date.now(),
-    models: [{
-      id: 'persisted-codex-model',
-      name: 'Persisted Model',
-      inputModalities: ['text'],
-      reasoning: { efforts: [{ id: ReasoningEffortId('low'), name: 'Low' }], defaultEffort: ReasoningEffortId('low') },
-      fastTier: true,
-    }],
-  })
-  let calls = 0
-  const adapter = new CodexAdapter({
-    models: STATIC_CODEX,
-    streamIdleTimeoutMs: 1000,
-    tokens: memoryTokens(codexSession),
-    discovery: true,
-    fetchFn: () => {
-      calls++
-      return Promise.reject(new Error('unexpected catalog fetch'))
-    },
-    catalogStore: store,
-  })
-  assert.deepEqual((await adapter.listModels('codex')).map(model => model.id), ['persisted-codex-model'])
-  const resolved = await adapter.resolveModel('codex', 'persisted-codex-model')
-  assert.deepEqual(resolved.inputModalities, ['text'])
-  assert.equal(resolved.reasoning?.defaultEffort, 'low')
-  assert.equal(await adapter.supportsFastTier('persisted-codex-model'), true)
-  assert.deepEqual(await adapter.fastCapableModels(), ['persisted-codex-model'])
-  assert.equal(calls, 0)
-})
-
-test('grok filters unsupported models from a fresh persisted catalog', async () => {
-  const store = memoryCatalogStore({
-    at: Date.now(),
-    models: [
-      { id: 'grok-build-0.1', name: 'Grok Build' },
-      { id: 'grok-4.5', name: 'Grok 4.5' },
-    ],
-  })
-  const adapter = new GrokAdapter({
-    models: STATIC_GROK,
-    streamIdleTimeoutMs: 1000,
-    tokens: memoryTokens(grokSession),
-    discovery: true,
-    fetchFn: () => Promise.reject(new Error('fresh persisted catalog must not fetch')),
-    catalogStore: store,
-  })
-  assert.deepEqual((await adapter.listModels('grok')).map(model => model.id), ['grok-4.5'])
-})
-
-test('grok invalidates an unsupported persisted catalog and falls back to the picker allowlist', async () => {
-  const store = memoryCatalogStore({
-    at: Date.now(),
-    models: [{ id: 'grok-build-0.1', name: 'Grok Build' }],
-  })
-  const adapter = new GrokAdapter({
-    models: [
-      { id: 'grok-4.6', name: 'Grok 4.6' },
-      { id: 'grok-4.5', name: 'Grok 4.5' },
-    ],
-    streamIdleTimeoutMs: 1000,
-    tokens: memoryTokens(grokSession),
-    discovery: true,
-    fetchFn: () => Promise.reject(new Error('fresh persisted catalog must not fetch')),
-    catalogStore: store,
-  })
-
-  assert.deepEqual(
-    (await adapter.listModels('grok')).map(model => model.id),
-    ['grok-4.6', 'grok-4.5'],
-  )
-  await settle()
-  assert.equal(store.saved(), undefined)
-})
 
 test('ModelCatalogCache serves the last-known catalog while a refresh runs or fails', async () => {
   // ttlMs 0 makes every entry instantly stale, so each resolve exercises the
@@ -1118,7 +1051,7 @@ test('grok listModels retries a 401 after a forced refresh before invalidating',
     catalogStore: store,
   })
   const models = await adapter.listModels('grok')
-  assert.deepEqual(models.map(model => model.id), ['grok-4.6', 'grok-4.5'])
+  assert.deepEqual(models.map(model => model.id), ['grok-4.6', 'grok-4.5', 'grok-build-0.1'])
   assert.equal(modelsCalls, 2)
   await settle()
   assert.notEqual(store.saved(), undefined)
@@ -1153,7 +1086,7 @@ test('grok listModels invalidates the catalog after a 401 that survives forced r
     catalogStore: store,
   })
   const models = await adapter.listModels('grok')
-  assert.deepEqual(models.map(model => model.id), ['grok-4.6'])
+  assert.deepEqual(models.map(model => model.id), ['grok-4'])
   await settle()
   assert.equal(store.saved(), undefined)
 })
@@ -1161,7 +1094,7 @@ test('grok listModels invalidates the catalog after a 401 that survives forced r
 test('codex resolveModel on a cold cache fetches the catalog itself', async () => {
   const { fetchFn } = fakeFetch(CODEX_MODELS_PAYLOAD)
   const adapter = codexAdapter({ session: codexSession, fetchFn })
-  const resolved = await adapter.resolveModel('codex', 'gpt-5.6-terra')
+  const resolved = await adapter.resolveModel('codex', 'gpt-5.2-codex')
   assert.deepEqual(resolved.reasoning?.efforts.map(effort => effort.id), ['low', 'high'])
   assert.equal(resolved.context?.contextWindow, 500_000)
 })
@@ -1377,7 +1310,7 @@ test('a member adapter keeps catalog rows and delegates pooled / extra ids', asy
     modelsForProvider: (provider: string) =>
       Promise.resolve([{ provider, id: 'smart', name: 'smart' }]),
     owns: (_provider: string, model: string) =>
-      Promise.resolve(model === 'smart' || model === 'gpt-5.6-sol'),
+      Promise.resolve(model === 'smart' || model === 'gpt-5.1-codex'),
     resolveModel: (provider: string, model: string) => {
       delegated.push(`resolve:${model}`)
       return Promise.resolve({ provider, id: model, name: model, context: { contextWindow: 1000 } })
@@ -1397,15 +1330,15 @@ test('a member adapter keeps catalog rows and delegates pooled / extra ids', asy
     pool: () => fakePool as never,
   })
   const models = await adapter.listModels('codex')
-  assert.deepEqual(models.map(model => model.id), ['gpt-5.6-sol', 'smart'])
-  const resolved = await adapter.resolveModel('codex', 'gpt-5.6-sol')
+  assert.deepEqual(models.map(model => model.id), ['gpt-5.1-codex', 'smart'])
+  const resolved = await adapter.resolveModel('codex', 'gpt-5.1-codex')
   assert.equal(resolved.context?.contextWindow, 1000)
   const chunks: { type: string }[] = []
   for await (const chunk of adapter.stream({
     provider: 'codex', model: 'smart', messages: [],
   })) chunks.push(chunk)
   assert.deepEqual(chunks, [{ type: 'text-delta', index: 0, text: 'pooled' }])
-  assert.deepEqual(delegated, ['resolve:gpt-5.6-sol', 'stream:smart'])
+  assert.deepEqual(delegated, ['resolve:gpt-5.1-codex', 'stream:smart'])
 })
 
 /** A fetch that hangs until `init.signal` aborts, then rejects. */
@@ -1582,7 +1515,7 @@ test('listModels sits out a hanging non-default account instead of blocking the 
   })
   const started = Date.now()
   const models = await adapter.listModels('codex')
-  assert.deepEqual(models.map(model => model.id), ['gpt-5.6-sol', 'gpt-5.6-terra'])
+  assert.deepEqual(models.map(model => model.id), ['gpt-5.1-codex', 'gpt-5.2-codex'])
   assert.ok(Date.now() - started < 500)
 })
 
@@ -1598,7 +1531,7 @@ test('clearAccountCatalog drops a non-default account cache so the next list ref
     fetchFn,
   })
   const first = await adapter.listOwnModels('codex', 'max')
-  assert.deepEqual(first.map(model => model.id), ['gpt-5.6-sol', 'gpt-5.6-terra'])
+  assert.deepEqual(first.map(model => model.id), ['gpt-5.1-codex', 'gpt-5.2-codex'])
   await adapter.listOwnModels('codex', 'max')
   assert.equal(calls(), 1)
   adapter.clearAccountCatalog('max')

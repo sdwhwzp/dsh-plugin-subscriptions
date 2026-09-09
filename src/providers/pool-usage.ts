@@ -98,8 +98,9 @@ export class PoolUsageTracker {
    * {@link snapshotFor} does: scoring routing decisions off data that is
    * known to be stale-and-unrefreshable risks steering traffic by a urgency
    * number the endpoint itself is no longer vouching for, whereas
-   * `snapshotFor`'s administrator-facing display concern has no such
-   * downside — showing an old percentage beats showing nothing.
+   * `snapshotFor`'s stale-display concern (the Settings page, the composer
+   * badge) has no such downside — showing an old percentage beats showing
+   * nothing.
    * @param member - the pool member to score (account resolved).
    * @returns availability plus the urgency score.
    */
@@ -190,8 +191,12 @@ export class PoolUsageTracker {
     let pending = this.inflight.get(key)
     if (pending === undefined) {
       // Captured before the fetch starts: whichever real snapshot is on
-      // record right now is what a failure below should fall back to.
-      const lastSnapshot = this.entries.get(key)?.snapshot
+      // record right now is what a failure below should fall back to. A
+      // failure entry's own `lastSnapshot` counts too — otherwise the stale
+      // snapshot would survive exactly one cooldown and vanish on the next
+      // consecutive failure, even though nothing newer ever replaced it.
+      const prior = this.entries.get(key)
+      const lastSnapshot = prior?.snapshot ?? prior?.lastSnapshot
       pending = fetcher().then(
         (snapshot) => {
           this.entries.set(key, { snapshot, at: Date.now() })

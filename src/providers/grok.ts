@@ -20,6 +20,7 @@ import type { PoolAdapter } from './pool.js'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { resolveImages } from '../translate/resolved.js'
 import { streamResponses, toResponsesInput, toResponsesTools } from '../translate/responses.js'
+import type { ResponsesRequestInput } from '../translate/responses.js'
 import {
   httpLlmError,
   idleWatchdog,
@@ -61,24 +62,6 @@ const GROK_CONTEXT_WINDOW = 256_000
 const GROK_DEFAULT_MAX_TOKENS = 32_000
 /** Refresh when the access token has less than this much life left. */
 export const GROK_PREEMPT_MS = 2 * 60_000
-
-/** Grok subscription models exposed in the customer model picker. */
-export const GROK_PICKER_MODELS: readonly ModelEntry[] = [
-  { id: 'grok-4.6', name: 'Grok 4.6' },
-  { id: 'grok-4.5', name: 'Grok 4.5' },
-]
-const GROK_PICKER_MODEL_IDS = new Set(GROK_PICKER_MODELS.map(model => model.id))
-
-/** Keep only the supported customer Grok models in every picker catalog source. */
-function pickerModels<Model extends { id: string }>(models: readonly Model[]): Model[] {
-  return models.filter(model => GROK_PICKER_MODEL_IDS.has(model.id))
-}
-
-/** Reject restored or crafted selections outside the customer Grok allowlist. */
-function assertPickerModel(provider: string, model: string): void {
-  if (GROK_PICKER_MODEL_IDS.has(model)) return
-  throw new LlmError(`grok provider "${provider}" does not expose model "${model}"`, 'UNKNOWN_MODEL')
-}
 
 /** Body fields xAI uses to name a delay or reset. */
 const GROK_RESET_FIELDS = ['retry_after', 'retry_after_seconds', 'resets_at', 'reset_at'] as const
@@ -498,6 +481,16 @@ export async function fetchGrokCliCatalog(
 }
 
 /**
+ * The /v1/models list also serves generation models that cannot chat
+ * (grok-imagine-image*, grok-imagine-video*) and embedding models; the picker
+ * must not offer them. Heuristic over the id substring, verified against the
+ * live catalog (grok-build-0.1 and the grok-4 family pass).
+ */
+function isChatModel(id: string): boolean {
+  return !/imagine|image-|video|embed/i.test(id)
+}
+
+/**
  * CLI-contributed fields carried forward from a previously discovered model.
  * @param prior - the last-known entry for this id, if any.
  * @returns enrichment to apply when the live CLI catalog cannot contribute.
@@ -526,7 +519,7 @@ function grokPriorMeta(prior: DiscoveredModel | undefined): GrokCliModelMeta {
  * @param previous - last-known catalog used to keep enrichment when the CLI
  *   catalog is down or omits a model.
  * @param signal - caller cancellation (pool-assembly timeout).
- * @returns supported customer models in endpoint order.
+ * @returns discovered chat models in endpoint order.
  */
 export async function fetchGrokModels(
   session: GrokSession,
@@ -562,7 +555,7 @@ export async function fetchGrokModels(
   const discovered: DiscoveredModel[] = []
   for (const entry of payload.data) {
     if (typeof entry.id !== 'string' || entry.id.length === 0 || seen.has(entry.id)) continue
-    if (!GROK_PICKER_MODEL_IDS.has(entry.id)) continue
+    if (!isChatModel(entry.id)) continue
     seen.add(entry.id)
     const cli = cliCatalog?.get(entry.id)
     discovered.push({
@@ -576,6 +569,41 @@ export async function fetchGrokModels(
   // the picker.
   if (discovered.length === 0) throw new Error('grok models endpoint returned an empty catalog')
   return discovered
+}
+
+/**
+ * Build one xAI Responses request body (exported for tests, like
+ * {@link codexRequestBody}). The tool trio renders only when tools exist:
+ * A reported xAI 400 invalid-argument on tool-less calls motivated omitting
+ * tool controls when no tools are supplied. Keep this endpoint-specific
+ * compatibility measure separate from assumptions about other backends.
+ */
+export function grokRequestBody(
+  options: GenerateOptions,
+  resolved: ResponsesRequestInput,
+): Record<string, unknown> {
+  return {
+    model: options.model,
+    ...resolved.instructions === undefined ? {} : { instructions: resolved.instructions },
+    input: resolved.input,
+    ...options.tools !== undefined && options.tools.length > 0
+      ? { tools: toResponsesTools(options.tools), tool_choice: 'auto', parallel_tool_calls: true }
+      : {},
+    ...options.maxTokens !== undefined ? { max_output_tokens: options.maxTokens } : {},
+    // The harness only passes an effort the resolved model advertised (the
+    // CLI catalog's), so this never reaches a model that rejects it.
+    ...options.reasoningEffort !== undefined
+      ? { reasoning: { effort: String(options.reasoningEffort) } }
+      : {},
+    // Cache-affinity hint (mirrors codex): xAI caches prompts per server,
+    // and `prompt_cache_key` is the Responses-API signal that routes repeat
+    // requests back to the cache-holding shard — without it every turn's
+    // cache hit is shard-routing luck. The session id is the stable key
+    // xAI's own docs recommend.
+    ...options.sessionId !== undefined ? { prompt_cache_key: String(options.sessionId) } : {},
+    store: false,
+    stream: true,
+  }
 }
 
 /** Constructor dependencies for {@link GrokAdapter}. */
@@ -684,7 +712,7 @@ export class GrokAdapter extends LlmAdapter {
   }
 
   private staticModels(provider: string): LlmModelInfo[] {
-    return pickerModels(this.options.models).map(model => ({
+    return this.options.models.map(model => ({
       provider,
       id: model.id,
       name: model.name ?? model.id,
@@ -699,7 +727,7 @@ export class GrokAdapter extends LlmAdapter {
     const extra = await pool.modelsForProvider(provider as ProviderId)
     const seen = new Set(own.map(model => model.id))
     // Account pools reuse the catalog row; only configured tiers are extra.
-    return pickerModels([...own, ...extra.filter(model => !seen.has(model.id))])
+    return [...own, ...extra.filter(model => !seen.has(model.id))]
   }
 
   /** The provider's own catalog: union of every account, or one account when named. */
@@ -722,20 +750,11 @@ export class GrokAdapter extends LlmAdapter {
       // The fetcher runs only on a cache miss, and resolves the session
       // through the refresh-aware path so an expired access token renews here
       // instead of failing discovery into the static fallback.
-      const discovered = await discoverOrRetryAuth(
+      return this.listed(provider, await discoverOrRetryAuth(
         force => this.options.tokens.session(account, force),
         catalog,
         () => catalog.get(() => this.fetchCatalog(account, signal)),
-      )
-      const current = pickerModels(discovered)
-      if (current.length === 0) {
-        catalog.invalidate()
-        this.options.onWarn?.(
-          'grok cached catalog has no supported Grok 4.6 or Grok 4.5 models; using the built-in catalog',
-        )
-        return this.staticModels(provider)
-      }
-      return this.listed(provider, current)
+      ))
     } catch (error: unknown) {
       if (isDiscoveryAborted(error, signal)) throw error
       // A permanent refresh failure deletes the stored session: the provider
@@ -767,7 +786,6 @@ export class GrokAdapter extends LlmAdapter {
   }
 
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
-    assertPickerModel(provider, model)
     const pool = this.options.pool?.()
     if (pool !== undefined && await pool.owns(provider as ProviderId, model)) {
       return pool.resolveModel(provider, model)
@@ -798,7 +816,6 @@ export class GrokAdapter extends LlmAdapter {
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    assertPickerModel(options.provider, options.model)
     const pool = this.options.pool?.()
     if (pool !== undefined && await pool.owns(options.provider as ProviderId, options.model)) {
       yield* pool.stream(options)
@@ -841,31 +858,7 @@ export class GrokAdapter extends LlmAdapter {
 
   private async request(options: GenerateOptions, session: GrokSession, signal: AbortSignal): Promise<Response> {
     const messages = await resolveImages(options.messages, this.options.resolveAttachments?.(), signal)
-    const { instructions, input } = toResponsesInput(messages, options.system)
-    const body = {
-      model: options.model,
-      ...instructions === undefined ? {} : { instructions },
-      input,
-      ...options.tools !== undefined && options.tools.length > 0
-        ? { tools: toResponsesTools(options.tools) }
-        : {},
-      tool_choice: 'auto',
-      parallel_tool_calls: true,
-      ...options.maxTokens !== undefined ? { max_output_tokens: options.maxTokens } : {},
-      // The harness only passes an effort the resolved model advertised (the
-      // CLI catalog's), so this never reaches a model that rejects it.
-      ...options.reasoningEffort !== undefined
-        ? { reasoning: { effort: String(options.reasoningEffort) } }
-        : {},
-      // Cache-affinity hint (mirrors codex): xAI caches prompts per server,
-      // and `prompt_cache_key` is the Responses-API signal that routes repeat
-      // requests back to the cache-holding shard — without it every turn's
-      // cache hit is shard-routing luck. The session id is the stable key
-      // xAI's own docs recommend.
-      ...options.sessionId !== undefined ? { prompt_cache_key: String(options.sessionId) } : {},
-      store: false,
-      stream: true,
-    }
+    const body = grokRequestBody(options, toResponsesInput(messages, options.system))
     return proxiedFetch(GROK_API_URL, {
       method: 'POST',
       headers: {

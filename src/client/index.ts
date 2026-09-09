@@ -1,23 +1,20 @@
 /**
  * Subscription OAuth login page, browser half. Registers the Subscriptions
  * settings section; every login state fact arrives through the node half's
- * generated `subscriptionsAuth` Remote namespace — this plugin holds no credential state of its
+ * `/subscriptions-auth` RPC channel — this plugin holds no credential state of its
  * own. Section copy rides the client locale service: one 'settings.subscriptions'
  * namespace with zh/en dictionaries, rebound per read so the nav label and
  * page text follow the active locale.
  */
+// Type-only: pulls the `ctx.slots` Context merge (dsh-client-runtime owned it
+// on rc.2; ui-renderer's augmentation carries it on the 0.1.2-alpha line).
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
-import type {} from '@deepseek-ai/dsh-api-remotes/client'
-import subscriptionsAuthRemote from 'dsh-plugin-subscriptions/remote'
-import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 // Type-only: pulls the shell's SlotMap merge (the 'settings.section' entry).
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 // Type-only: pulls ui-conversation's SlotMap merge (the 'conversation.input.right' entry).
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
-// Type-only: pulls the renderer-owned slots service.
-import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
-// Type-only: pulls the modelDirectories Context merge used by the Speed toggle.
-import type {} from '@deepseek-ai/dsh-client-ui-model-selection/client'
 // Type-only: pulls the locale plugin's Context merge (ctx.locale).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 // Type-only: the slash-command registry contract (the /fast contribution).
@@ -27,14 +24,14 @@ import type { CommandUiContract } from '@deepseek-ai/dsh-client-ui-commands/clie
 // nodenext the .js specifier resolves to the .tsx source (see README note).
 import { SubscriptionsSection } from './SubscriptionsSection.js'
 import type { SubscriptionsSectionInjected } from './SubscriptionsSection.js'
-import type { SubscriptionsAuthClient } from './SubscriptionsSection.js'
-import { resolveSubscriptionsAuthClient } from './subscriptions-auth-client.js'
 import { ImageGenerateToolview, createImageLoader } from './ImageGenerateToolview.js'
 import type { ImageGenerateToolviewInjected } from './ImageGenerateToolview.js'
 import { VideoGenerateToolview, createVideoLoader } from './VideoGenerateToolview.js'
 import type { VideoGenerateToolviewInjected } from './VideoGenerateToolview.js'
 import { SpeedSelect, createSpeedLoader, createSpeedSetter } from './SpeedSelect.js'
-import type { SpeedSelectInjected } from './SpeedSelect.js'
+import type { ModelDirectoriesLike, SpeedSelectInjected } from './SpeedSelect.js'
+import { SubscriptionUsageBadge } from './SubscriptionUsageBadge.js'
+import type { SubscriptionUsageBadgeInjected } from './SubscriptionUsageBadge.js'
 import { en, zh } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
 
@@ -42,6 +39,7 @@ export type { SubscriptionsSectionInjected, SubscriptionsSectionProps } from './
 export type { ImageGenerateToolviewInjected, ImageGenerateToolviewProps } from './ImageGenerateToolview.js'
 export type { VideoGenerateToolviewInjected, VideoGenerateToolviewProps } from './VideoGenerateToolview.js'
 export type { SpeedSelectInjected, SpeedSelectProps, SpeedState, SpeedTier } from './SpeedSelect.js'
+export type { SubscriptionUsageBadgeInjected, SubscriptionUsageBadgeProps } from './SubscriptionUsageBadge.js'
 export type { SubscriptionsKey } from './locales.js'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -55,10 +53,11 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 const NS = 'settings.subscriptions'
 
 /**
- * Required services: the renderer owns `slots`, API Gateway owns `remote`,
- * model selection owns `modelDirectories`, and locale owns the copy dictionaries.
+ * Required services (cordis fiber inject): `slots` carries the registration
+ * seat, `connection` the `/subscriptions-auth` RPC caller, and `locale` the copy
+ * dictionaries.
  */
-export const inject = ['slots', 'remote', 'modelDirectories', 'locale']
+export const inject = ['slots', 'connection', 'locale']
 
 /**
  * Register the Subscriptions section once the `settings.section` declaration
@@ -66,9 +65,7 @@ export const inject = ['slots', 'remote', 'modelDirectories', 'locale']
  * constrained; registration depends on the slot through `slots.inject()`).
  * @param ctx - client root context.
  */
-export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
-  const disposeRemote = await ctx.remote.$mount(subscriptionsAuthRemote)
-  const remote: SubscriptionsAuthClient = await resolveSubscriptionsAuthClient(ctx)
+export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-plugin-subscriptions: copy dictionaries')
   // Settings-shell nudge: the panel (nav title + header row + section body)
   // sits flush against the panel's top edge; push it down a little to leave
@@ -81,8 +78,11 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
     document.head.appendChild(style)
     return () => style.remove()
   }, 'dsh-plugin-subscriptions: settings panel breathing room')
+  // The shell's Context merge types `connection` as the host handle; in the
+  // browser shell the same key holds the full client ConnectionHandle.
+  const connection = ctx.get('connection') as unknown as ConnectionHandle
   const t = ctx.locale.bind(NS) as SubscriptionsSectionInjected['t']
-  const injected = (): SubscriptionsSectionInjected => ({ remote, t })
+  const injected = (): SubscriptionsSectionInjected => ({ rpc: connection.rpc, t })
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: 'subscriptions',
@@ -95,7 +95,7 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
   // The image_generate keyed toolview owns how image calls render inline; its
   // gallery bytes ride the same channel through the injected loader. The
   // framework synthesizes the toolview's own `t` seat from `locale: NS`.
-  const toolviewInjected = (): ImageGenerateToolviewInjected => ({ load: createImageLoader(remote) })
+  const toolviewInjected = (): ImageGenerateToolviewInjected => ({ load: createImageLoader(connection.rpc) })
   ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
     name: 'tool.call.toolview',
     key: 'image_generate',
@@ -105,7 +105,7 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
 
   // The video_generate keyed toolview plays the saved MP4 inline; its bytes
   // ride the same channel's `video` endpoint through the injected loader.
-  const videoToolviewInjected = (): VideoGenerateToolviewInjected => ({ loadVideo: createVideoLoader(remote) })
+  const videoToolviewInjected = (): VideoGenerateToolviewInjected => ({ loadVideo: createVideoLoader(connection.rpc) })
   ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
     name: 'tool.call.toolview',
     key: 'video_generate',
@@ -116,16 +116,30 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
   // The composer Speed toggle (codex fast tier) sits in the right tool row,
   // just left of the model selector; the framework synthesizes its `t` seat
   // from `locale: NS`, and the inject face binds each session's RPC calls.
+  // The current-model read rides ui-model-selection's `modelDirectories`
+  // service, resolved lazily so registration order never matters.
+  const models = (): ModelDirectoriesLike | undefined =>
+    ctx.get('modelDirectories') as ModelDirectoriesLike | undefined
   ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
     name: 'conversation.input.right',
     id: 'codex-speed',
     order: 0,
     locale: NS,
-    inject: (sessionId: SessionId): SpeedSelectInjected => ({
-      loadSpeed: createSpeedLoader(remote, ctx.modelDirectories, sessionId),
-      setSpeed: createSpeedSetter(remote, sessionId),
+    inject: (sessionId: string): SpeedSelectInjected => ({
+      loadSpeed: createSpeedLoader(connection, models, sessionId),
+      setSpeed: createSpeedSetter(connection, sessionId),
     }),
   }, SpeedSelect))
+
+  // The subscription usage badge renders a compact readout in the composer's
+  // stats strip (conversation.composer.dock) — e.g. "Claude 5h 45% · Wk 23%".
+  // A fresh id means it appears beside the shipped StatsLine, never replacing it.
+  ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
+    name: 'conversation.composer.dock',
+    id: 'subscription-usage',
+    order: 10,
+    inject: (): SubscriptionUsageBadgeInjected => ({ rpc: connection.rpc }),
+  }, SubscriptionUsageBadge))
 
   // The /fast slash command offers the same Standard/Fast choice as a popup.
   // `available` is synchronous and sees only the session id, so the command
@@ -136,12 +150,12 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
     const command = scope.get('commandUi') as CommandUiContract
     scope.effect(() => command.register({
       name: 'fast',
-      description: t('commandFast'),
+      description: () => t('commandFast'),
       available: () => true,
       ui: {
         kind: 'popupSelect',
         options: async (session) => {
-          const state = await createSpeedLoader(remote, ctx.modelDirectories, session.sessionId)()
+          const state = await createSpeedLoader(connection, models, session.sessionId)()
           if (!state.visible) throw new Error(t('commandFastUnavailable'))
           return ([
             { id: 'standard', label: t('speedStandard'), detail: t('speedStandardDescription') },
@@ -149,10 +163,9 @@ export async function apply(ctx: ClientContext): Promise<() => Promise<void>> {
           ] as const).map(option => ({ ...option, active: option.id === state.tier }))
         },
         onSelect: async (option, session) => {
-          await createSpeedSetter(remote, session.sessionId)(option.id as 'standard' | 'fast')
+          await createSpeedSetter(connection, session.sessionId)(option.id as 'standard' | 'fast')
         },
       },
     }), 'dsh-plugin-subscriptions: /fast contribution')
   })
-  return disposeRemote
 }

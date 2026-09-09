@@ -7,6 +7,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import './keep-alive.js'
 import { LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmModelInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { PoolAdapter } from '../src/providers/pool.js'
@@ -25,6 +26,27 @@ const SessionId = (id: string): NonNullable<GenerateOptions['sessionId']> =>
   id as NonNullable<GenerateOptions['sessionId']>
 
 const OPTIONS: GenerateOptions = { provider: 'codex', model: 'm', messages: [] }
+
+test('pool context intersects each account and each model, including same-provider tiers', async () => {
+  const adapter = new FakeAdapter(() => serveOk())
+  const visited: string[] = []
+  adapter.resolveOwnModel = async (provider: string, model: string, account?: string) => {
+    visited.push(`${model}/${account}`)
+    return { provider, id: model, name: model, context: { contextWindow: account === 'small' ? 300000 : 872000 } }
+  }
+  const pool = new PoolAdapter({
+    adapters: { codex: adapter }, health: new PoolHealthRegistry(),
+    usage: new PoolUsageTracker(() => undefined), strategy: 'priority', switchMargin: 2,
+    defaultAccount: async () => 'large', onWarn: () => {},
+    families: async () => new Map([[poolKey('codex', 'm'), { members: [
+      { provider: 'codex', model: 'm', account: 'large' },
+      { provider: 'codex', model: 'm', account: 'small' },
+    ] }]]),
+    tiers: {},
+  })
+  assert.equal((await pool.resolveModel('codex', 'm')).context?.contextWindow, 300000)
+  assert.deepEqual(visited, ['m/large', 'm/small'])
+})
 
 /** A scripted member adapter: serves chunks from `serve`, counts calls and the accounts used. */
 class FakeAdapter extends LlmAdapter implements AccountAwareAdapter {
