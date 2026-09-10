@@ -26,7 +26,7 @@ Models that advertise reasoning levels get an **Effort** selector in the same me
 
 ![Reasoning effort selector](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/model-effort.png)
 
-Codex models whose catalog advertises the fast tier (the codex CLI's fast mode) get a **Speed** toggle in the composer's tool row, next to the model selector — Standard or Fast (`service_tier: priority`), per session. The `/fast` slash command offers the same choice as a popup; it errors with an explanation when the current model has no fast tier.
+Codex models whose catalog advertises the fast tier (the codex CLI's fast mode) get a **Speed** toggle in the composer's tool row, next to the model selector — Standard or Fast (`service_tier: priority`), per session. The `/fast` slash command offers the same choice as a popup; it errors with an explanation when the current model has no fast tier. Set `fastTier: false` to withdraw the tier entirely: the toggle hides, `/fast` reports it unavailable, and no request carries `service_tier` — for a deployment that must not spend at the priority rate, which the provider bills higher and reports under the same model id, leaving accounting unable to tell the two apart.
 
 ![Speed toggle with the Standard/Fast menu open](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/speed-toggle.png)
 

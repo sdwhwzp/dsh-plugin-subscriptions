@@ -140,6 +140,17 @@ export interface Config {
   streamIdleTimeoutMs?: number
   /** Whether and how long a route waits out a closed rate-limit window. */
   rateLimit?: RateLimitConfig
+  /**
+   * Whether the Codex fast tier is offered at all (default true).
+   *
+   * Fast routes a request at `service_tier: priority`, which the provider
+   * bills at a higher rate and reports under the same model id — nothing
+   * downstream, accounting included, can tell the two apart afterwards. A
+   * deployment that must not spend at that rate turns the tier off here: the
+   * composer's Speed toggle hides, `/fast` reports the tier unavailable, and
+   * no request carries `service_tier`.
+   */
+  fastTier?: boolean
   /** Advisory model catalogs overriding the built-in defaults, per provider. */
   models?: {
     codex?: ModelEntry[]
@@ -190,6 +201,7 @@ export const Config: z<Config> = z.object({
     wait: z.boolean().default(true),
     maxWaitMs: z.number().min(1).default(DEFAULT_RATE_LIMIT_MAX_WAIT_MS),
   }),
+  fastTier: z.boolean().default(true),
   models: z.object({
     codex: z.array(modelEntrySchema),
     claude: z.array(modelEntrySchema),
@@ -633,6 +645,10 @@ export function apply(ctx: Context, config: Config): void {
   // restores standard routing), gated per request on the model's discovered
   // fast-tier support so a stale choice cannot leak onto a plain model.
   const speedBySession = new Map<string, SpeedTier>()
+  // A deployment that does not permit the priority rate reports no fast-capable
+  // model, which is the same state the UI already handles when logged out: the
+  // toggle hides and `/fast` says the tier is unavailable.
+  const fastTierOffered = config.fastTier !== false
   let codexAdapter: CodexAdapter | undefined
   // Dropped on every copilot auth transition so replay state (captured
   // reasoning) never survives an account switch in memory.
@@ -672,7 +688,8 @@ export function apply(ctx: Context, config: Config): void {
           contextWindowOf: model => preferences.contextWindow(model),
           pool: () => poolAdapter,
           speedFor: (sessionId: string | undefined, model: string): boolean | Promise<boolean> =>
-            sessionId !== undefined
+            fastTierOffered
+            && sessionId !== undefined
             && speedBySession.get(sessionId) === 'fast'
             && adapter.supportsFastTier(model),
         })
@@ -877,12 +894,15 @@ export function apply(ctx: Context, config: Config): void {
   const speed: SpeedController = {
     async speed(sessionId) {
       return {
-        tier: speedBySession.get(sessionId) ?? 'standard',
-        fastModels: await codexAdapter?.fastCapableModels() ?? [],
+        tier: fastTierOffered ? speedBySession.get(sessionId) ?? 'standard' : 'standard',
+        fastModels: fastTierOffered ? await codexAdapter?.fastCapableModels() ?? [] : [],
       }
     },
     async setSpeed(sessionId, tier) {
-      if (tier === 'standard') speedBySession.delete(sessionId)
+      // Refused at the controller, not only hidden in the UI: the RPC is
+      // reachable directly, and a stored 'fast' would route at the priority
+      // rate the deployment turned off.
+      if (tier === 'standard' || !fastTierOffered) speedBySession.delete(sessionId)
       else speedBySession.set(sessionId, tier)
     },
   }

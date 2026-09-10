@@ -39,3 +39,21 @@ Upstream's `ProviderSettingsStore` supersedes this fork's hardcoded Codex and
 Grok picker lists: it makes model visibility a durable per-provider preference
 instead of a compiled-in allowlist, so the lists are gone. Upstream also owns
 the Responses `strict` opt-out and the pool usage fixes this fork had carried.
+
+## `fastTier` — withdrawing the Codex priority tier
+
+Fast routes a request at `service_tier: priority`, which the provider bills at
+a higher rate and reports back under the same model id. Nothing downstream can
+separate the two afterwards: the session log's `request/header` records only
+provider, model, reasoning effort and max tokens, so a per-model rate table
+(dsh-spend's included) prices a fast call as if it were standard.
+
+This deployment must not spend at that rate, so `fastTier: false` withdraws it
+rather than leaving it visible and mispriced. The gate sits in three places
+because the RPC is reachable without the UI: `speed()` reports no fast-capable
+model (the state the UI already renders as a hidden toggle and an unavailable
+`/fast`), `setSpeed()` refuses to store the tier, and `speedFor()` never sends
+`service_tier`.
+
+Upstream can carry this as an ordinary config field; offer it upstream before
+carrying the divergence further.

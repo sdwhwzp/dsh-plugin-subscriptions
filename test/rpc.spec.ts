@@ -24,7 +24,7 @@ interface FakeStore {
 }
 
 /** Mount the plugin with fake llm/connection (and optional attachments); return the RPC handler. */
-async function mount(attachments?: FakeStore): Promise<ConnectionRpcHandler> {
+async function mount(attachments?: FakeStore, config: Record<string, unknown> = {}): Promise<ConnectionRpcHandler> {
   let handler: ConnectionRpcHandler | undefined
   const ctx = new Context()
   ctx.provide('llm', { registerAdapter: () => Object.assign(() => {}, { replace: () => {} }) })
@@ -40,7 +40,7 @@ async function mount(attachments?: FakeStore): Promise<ConnectionRpcHandler> {
     },
   })
   if (attachments !== undefined) ctx.provide('attachments', attachments)
-  ctx.plugin(plugin, { providers: ['codex'] })
+  ctx.plugin(plugin, { providers: ['codex'], ...config })
   await new Promise(resolve => setTimeout(resolve, 50))
   assert.ok(handler !== undefined, 'the shared-channel subscriptions-auth interceptor was registered')
   return handler
@@ -138,6 +138,20 @@ test('video endpoint: name validation and missing file', async () => {
   const missing = await handler('video', { name: 'absent.mp4' }, new AbortController().signal)
   assert.equal(missing.ok, false)
   if (!missing.ok) assert.equal(missing.error.code, 'internal')
+})
+
+test('fastTier: false refuses the priority tier at the controller, not just in the UI', async () => {
+  // The RPC is reachable directly, so a stored 'fast' would keep routing at
+  // the rate the deployment turned off even with the toggle hidden.
+  const handler = await mount(undefined, { fastTier: false })
+  const signal = new AbortController().signal
+  await handler('setSpeed', { sessionId: 's1', tier: 'fast' }, signal)
+  assert.deepEqual(await handler('speed', { sessionId: 's1' }, signal), {
+    ok: true,
+    // No fast-capable model is reported, which is what hides the composer
+    // toggle and makes `/fast` report the tier unavailable.
+    value: { tier: 'standard', fastModels: [] },
+  })
 })
 
 test('speed endpoints: per-session tier round trip and payload validation', async () => {
