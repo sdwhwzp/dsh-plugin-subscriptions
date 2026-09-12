@@ -69,3 +69,9 @@ HTTP 400 messages.1.content.0.tool_use.id: String should match pattern '^[a-zA-Z
 `src/translate/anthropic.ts` 里 `tool_use.id` 与 `tool_result.tool_use_id` 现在走同一个 `anthropicToolId`：合法 id 原样返回，非法 id 清洗为合法字符再缀上原串的 sha256(base64url) 前缀。缀哈希不是装饰——只把非法字符统一替换成 `_` 会让 `a.b` 与 `a-b` 塌成同一个 id，结果就会答到错误的调用上；base64url 的字母表恰好等于允许集合，不会重新引入问题。
 
 两侧必须走同一个函数：Anthropic 校验的是「结果的 `tool_use_id` 是否等于前面某个 `tool_use.id`」，只改一侧会把字符错误换成配对错误。合并上游时若改动消息装配，须保持这一点。
+
+## Antigravity 合并的适配点
+
+合并 `upstream/feat/antigravity-subscription` 时，上游新增的 `test/provider-settings-rpc.spec.ts` 用 `rpc.handle` 桩连接，而本 fork 按 §1 注册在共享认证通道上的 `rpc.intercept`，于是 handler 永远为空。该测试已改用与本仓其他 RPC 测试相同的 intercept 桩（记录拦截器并补回端点前缀）。上游若把这套测试并进 main，合并时需要重复这一处适配。
+
+README 的三处冲突同理：双方各自新增段落，保留 fork 的 ChatGPT/Grok 选择器段落，usage 段落采用上游版本（已含 Antigravity）。`test/login.spec.ts` 的子账号权限测试与上游的 antigravity 登录测试并存。

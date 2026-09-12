@@ -95,3 +95,60 @@ test('provider settings RPC edits picker visibility without losing the editor ca
     await rm(home, { recursive: true, force: true })
   }
 })
+
+test('Antigravity registers the real multi-account adapter with provider settings', async () => {
+  const { saveAccountSession, authFilePath, accountKeyOf, listAccounts } = await import('../src/auth/store.js')
+  const home = await mkdtemp(join(tmpdir(), 'antigravity-rpc-'))
+  const previous = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  const ctx = new Context()
+  const adapters = new Map<string, AccountAwareAdapter>()
+  let handler: ConnectionRpcHandler | undefined
+  ctx.provide('llm', {
+    registerAdapter: (routes: string[], adapter: AccountAwareAdapter) => {
+      adapters.set(routes[0], adapter)
+      return Object.assign(() => {}, { replace: () => {} })
+    },
+  })
+  // This fork registers on the shared authenticated channel rather than a
+  // channel of its own, so the stub records the interceptor and re-adds the
+  // prefix the assertions omit — the same shape the other RPC tests use.
+  ctx.provide('connection', { rpc: { intercept: (
+    _channel: string,
+    _matches: (endpoint: string) => boolean,
+    inner: ConnectionRpcHandler,
+  ) => {
+    handler = ((endpoint, payload, signal, principal) =>
+      inner(`subscriptions-auth/${endpoint}`, payload, signal, principal)) as ConnectionRpcHandler
+    return async () => {}
+  } } })
+  const runtime = ctx.plugin(plugin, {
+    providers: ['antigravity'], pool: { enabled: false },
+    models: { antigravity: [{ id: 'm1', inputModalities: ['text', 'image'] }, { id: 'm2', inputModalities: ['text'] }] },
+    antigravity: { clientId: 'configured-client.example.invalid', onboard: false },
+  })
+  try {
+    assert.ok(authFilePath().startsWith(home))
+    for (const account of ['alice', 'bob']) {
+      const session = { accessToken: account, refreshToken: account, expiresAt: Date.now() + 3600_000, projectId: `project-${account}`, account }
+      await saveAccountSession('antigravity', accountKeyOf('antigravity', session), session)
+    }
+    await new Promise(resolve => setTimeout(resolve, 50))
+    assert.ok(handler)
+    assert.deepEqual((await listAccounts('antigravity')).map(entry => entry.key), ['alice', 'bob'])
+    const adapter = adapters.get('antigravity')!
+    assert.deepEqual((await adapter.listOwnModels('antigravity', 'bob')).map(model => model.id), ['m1', 'm2'])
+    const call = (endpoint: string, payload: unknown) => handler!(endpoint, payload, new AbortController().signal)
+    const catalog = await call('providerSettings', { provider: 'antigravity', force: true })
+    assert.ok(catalog.ok)
+    assert.deepEqual((catalog.value as { models: { id: string }[] }).models.map(model => model.id), ['m1', 'm2'])
+    assert.deepEqual((catalog.value as { tools: string[] }).tools, [])
+    assert.equal((await call('setProviderSettings', { provider: 'antigravity', settings: { visibleModels: ['m2'] } })).ok, true)
+    assert.deepEqual((await adapter.listModels('antigravity')).map(model => model.id), ['m2'])
+    assert.equal((await call('setProviderSettings', { provider: 'antigravity', settings: { tools: { image_generate: true } } })).ok, false)
+  } finally {
+    await runtime.dispose()
+    if (previous === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previous
+    await rm(home, { recursive: true, force: true })
+  }
+})

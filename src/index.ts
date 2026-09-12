@@ -1,6 +1,6 @@
 /**
  * dsh-plugin-subscriptions: register OAuth-subscription LLM providers
- * (ChatGPT/Codex, Claude, Grok, GitHub Copilot) on `ctx.llm`, and expose the `/subscriptions-auth`
+ * (ChatGPT/Codex, Claude, Grok, GitHub Copilot, Google Antigravity) on `ctx.llm`, and expose the `/subscriptions-auth`
  * RPC channel the web Settings page uses to run the logins. The token store
  * lives at `~/.dsh/plugins/subscriptions/auth.json`; the channel registers only when
  * a host `connection` service exists, so headless compositions load fine.
@@ -54,6 +54,7 @@ import type {
   ClaudeSession,
   CodexSession,
   CopilotSession,
+  AntigravitySession,
   GrokSession,
   ProviderId,
   StoredSession,
@@ -108,6 +109,17 @@ import {
   isCopilotPermanentRefreshError,
   refreshCopilot,
 } from './providers/copilot.js'
+import {
+  AntigravityAdapter,
+  antigravityFlow,
+  ANTIGRAVITY_PREEMPT_MS,
+  exchangeAntigravityCode,
+  fetchAntigravityUsage,
+  isAntigravityPermanentRefreshError,
+  refreshAntigravity,
+  resolveAntigravityOAuthConfig,
+} from './providers/antigravity.js'
+import type { AntigravityRuntimeConfig } from './providers/antigravity.js'
 import { createXSearchTool } from './tools/x-search.js'
 import { createImageGenerateTool } from './tools/image-generate.js'
 import { createVideoGenerateTool, videosDirectory } from './tools/video-generate.js'
@@ -118,7 +130,7 @@ import { ProviderSettingsStore, PROVIDER_TOOLS, validatePreferences } from './pr
 export type { ModelEntry, ProviderUsage, UsageWindow } from './providers/common.js'
 export type { RateLimitConfig, RateLimitWait } from './providers/rate-limit.js'
 export type { ProviderStatus } from './auth/rpc.js'
-export type { ClaudeSession, CodexSession, CopilotSession, GrokSession, ProviderId } from './auth/store.js'
+export type { AntigravitySession, ClaudeSession, CodexSession, CopilotSession, GrokSession, ProviderId } from './auth/store.js'
 
 export const name = 'dsh-plugin-subscriptions'
 export const inject = ['llm']
@@ -134,7 +146,7 @@ export { withTimeout } from './providers/common.js'
 export interface Config {
   /** Codex /models client_version override; does not change account entitlements. */
   codexClientVersion?: string
-  /** Provider routes to register; defaults to all four. */
+  /** Provider routes to register; defaults to every supported provider. */
   providers?: ProviderId[]
   /** Maximum provider idle time while one stream read is outstanding (default five minutes). */
   streamIdleTimeoutMs?: number
@@ -157,6 +169,14 @@ export interface Config {
     claude?: ModelEntry[]
     grok?: ModelEntry[]
     copilot?: ModelEntry[]
+    antigravity?: ModelEntry[]
+  }
+  /** Antigravity-specific OAuth and endpoint configuration. */
+  antigravity?: AntigravityRuntimeConfig & {
+    /** Google OAuth client id. May instead be supplied as ANTIGRAVITY_CLIENT_ID. */
+    clientId?: string
+    /** Google OAuth client secret, when required by the client registration. */
+    clientSecret?: string
   }
   /** Same-subscription account pools (and optional extra tier models). */
   pool?: {
@@ -177,7 +197,7 @@ export interface Config {
   }
 }
 
-const providerIdSchema = z.union(['codex', 'claude', 'grok', 'copilot'])
+const providerIdSchema = z.union(['codex', 'claude', 'grok', 'copilot', 'antigravity'])
 const modelEntrySchema: z<ModelEntry> = z.object({
   id: z.string().required(),
   name: z.string(),
@@ -194,7 +214,7 @@ const poolMemberSchema: z<PoolMemberRef> = z.object({
 })
 
 export const Config: z<Config> = z.object({
-  providers: z.array(providerIdSchema).default(['codex', 'claude', 'grok', 'copilot']),
+  providers: z.array(providerIdSchema).default(['codex', 'claude', 'grok', 'copilot', 'antigravity']),
   codexClientVersion: z.string(),
   streamIdleTimeoutMs: z.number().min(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   rateLimit: z.object({
@@ -207,6 +227,14 @@ export const Config: z<Config> = z.object({
     claude: z.array(modelEntrySchema),
     grok: z.array(modelEntrySchema),
     copilot: z.array(modelEntrySchema),
+    antigravity: z.array(modelEntrySchema),
+  }),
+  antigravity: z.object({
+    clientId: z.string(),
+    clientSecret: z.string().role('secret'),
+    baseURL: z.string(),
+    userAgent: z.string(),
+    onboard: z.boolean().default(true),
   }),
   pool: z.object({
     enabled: z.boolean().default(true),
@@ -245,6 +273,13 @@ const DEFAULT_MODELS: Record<ProviderId, ModelEntry[]> = {
     { id: 'claude-sonnet-4.5', name: 'Claude Sonnet 4.5', inputModalities: ['text', 'image'] },
     { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', inputModalities: ['text', 'image'] },
   ],
+  // Static fallback only; the authenticated fetchAvailableModels response wins.
+  antigravity: [
+    { id: 'gemini-3-flash', name: 'Gemini 3 Flash', inputModalities: ['text', 'image'] },
+    { id: 'gemini-3.1-pro-high', name: 'Gemini 3.1 Pro High', inputModalities: ['text', 'image'] },
+    { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', inputModalities: ['text', 'image'] },
+    { id: 'claude-opus-4-6-thinking', name: 'Claude Opus 4.6 Thinking', inputModalities: ['text', 'image'] },
+  ],
 }
 
 /** Validate and detach the model catalog for every provider. */
@@ -255,7 +290,13 @@ function resolveCatalog(models: Config['models']): Record<ProviderId, ModelEntry
     const entries = configured !== undefined && configured.length > 0 ? configured : DEFAULT_MODELS[provider]
     return validateModels(entries, `${name}: models.${provider}`)
   }
-  return { codex: resolve('codex'), claude: resolve('claude'), grok: resolve('grok'), copilot: resolve('copilot') }
+  return {
+    codex: resolve('codex'),
+    claude: resolve('claude'),
+    grok: resolve('grok'),
+    copilot: resolve('copilot'),
+    antigravity: resolve('antigravity'),
+  }
 }
 
 /** The display account of a stored session, for the status endpoint. */
@@ -271,6 +312,7 @@ function accountOf(provider: ProviderId, session: StoredSession | undefined): st
     case 'claude': return (session as ClaudeSession).emailAddress
     case 'grok': return (session as GrokSession).account
     case 'copilot': return (session as CopilotSession).account
+    case 'antigravity': return (session as AntigravitySession).account
   }
 }
 
@@ -347,6 +389,8 @@ export class SubscriptionsAuthController implements AuthController {
      * a 429.
      */
     private readonly poolUsage: PoolUsageTracker | undefined = undefined,
+    /** Antigravity OAuth/runtime configuration. */
+    private readonly antigravityConfig: Config['antigravity'] = {},
   ) {}
 
   usage(provider: ProviderId, account: string, signal: AbortSignal, force = false): Promise<ProviderUsage> {
@@ -434,7 +478,11 @@ export class SubscriptionsAuthController implements AuthController {
       void this.completeDevice(provider, attempt)
       return { authorizeUrl: attempt.verificationUrl, userCode: attempt.userCode }
     }
-    const spec = provider === 'grok' ? await grokFlow() : codexFlow
+    const spec = provider === 'grok'
+      ? await grokFlow()
+      : provider === 'antigravity'
+        ? antigravityFlow(resolveAntigravityOAuthConfig(this.antigravityConfig))
+        : codexFlow
     const attempt = await this.flows.start(provider, spec)
     // Claimed only once the attempt exists: a rejected `start()` (one attempt
     // per provider) must not supersede the attempt already running.
@@ -517,6 +565,14 @@ export class SubscriptionsAuthController implements AuthController {
       case 'copilot':
         // Device flow: exchange happens in completeDevice, never here.
         return Promise.reject(new Error('copilot uses the device flow; no authorization code to exchange'))
+      case 'antigravity':
+        return exchangeAntigravityCode(
+          code,
+          attempt.pkce.verifier,
+          attempt.redirectUri,
+          resolveAntigravityOAuthConfig(this.antigravityConfig),
+          this.antigravityConfig,
+        )
     }
   }
 
@@ -796,6 +852,38 @@ export function apply(ctx: Context, config: Config): void {
         handles.set('copilot', ctx.llm.registerAdapter(['copilot'], copilotAdapter))
         break
       }
+      case 'antigravity': {
+        const tokens = new AccountTokenManager<AntigravitySession>({
+          provider: 'antigravity',
+          displayName: 'Google Antigravity',
+          makeOptions: () => ({
+            preemptMs: ANTIGRAVITY_PREEMPT_MS,
+            refresh: session => refreshAntigravity(session, resolveAntigravityOAuthConfig(config.antigravity)),
+            isPermanent: isAntigravityPermanentRefreshError,
+          }),
+          onAccountRemoved: account => { authChanged('antigravity', account) },
+        })
+        accountTokens.set('antigravity', tokens as AccountTokenManager<StoredSession>)
+        usageFetchers.antigravity = async (account, signal) => fetchAntigravityUsage(
+          await tokens.session(account), config.antigravity, proxiedFetch, signal,
+        )
+        const adapter = new AntigravityAdapter({
+          models: catalog.antigravity,
+          streamIdleTimeoutMs,
+          rateLimit,
+          tokens,
+          discovery: !overridden.has('antigravity'),
+          ...config.antigravity === undefined ? {} : { runtime: config.antigravity },
+          onWarn,
+          resolveAttachments,
+          catalogStore: catalogStore('antigravity'),
+          defaultEffortOf: model => defaultEffortOf('antigravity', model),
+          pool: () => poolAdapter,
+        })
+        adapters.set('antigravity', adapter)
+        handles.set('antigravity', ctx.llm.registerAdapter(['antigravity'], adapter))
+        break
+      }
     }
   }
 
@@ -827,6 +915,13 @@ export function apply(ctx: Context, config: Config): void {
           const tokens = grokTokens
           return tokens === undefined ? undefined : async () =>
             fetchGrokUsage(await tokens.session(account), proxiedFetch, AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS))
+        }
+        case 'antigravity': {
+          const tokens = accountTokens.get('antigravity')
+          return tokens === undefined ? undefined : async () => fetchAntigravityUsage(
+            await tokens.session(account) as AntigravitySession, config.antigravity, proxiedFetch,
+            AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS),
+          )
         }
         case 'copilot':
           return undefined
@@ -992,7 +1087,7 @@ export function apply(ctx: Context, config: Config): void {
     },
   }
   registerAuthRpc(ctx, new SubscriptionsAuthController(
-    flows, deviceFlows, authChanged, resolveAttachments, usageFetchers, undefined, poolUsage,
+    flows, deviceFlows, authChanged, resolveAttachments, usageFetchers, undefined, poolUsage, config.antigravity,
   ), speed, {
     get: () => proxyGetConfig(),
     set: input => proxySetConfig(input),

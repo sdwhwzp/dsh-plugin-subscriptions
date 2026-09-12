@@ -11,6 +11,7 @@ export const PROVIDER_TOOLS = {
   claude: [],
   grok: ['image_generate', 'video_generate', 'x_search'],
   copilot: [],
+  antigravity: [],
 } as const
 interface ToolRevision {
   at: number
