@@ -75,3 +75,13 @@ HTTP 400 messages.1.content.0.tool_use.id: String should match pattern '^[a-zA-Z
 合并 `upstream/feat/antigravity-subscription` 时，上游新增的 `test/provider-settings-rpc.spec.ts` 用 `rpc.handle` 桩连接，而本 fork 按 §1 注册在共享认证通道上的 `rpc.intercept`，于是 handler 永远为空。该测试已改用与本仓其他 RPC 测试相同的 intercept 桩（记录拦截器并补回端点前缀）。上游若把这套测试并进 main，合并时需要重复这一处适配。
 
 README 的三处冲突同理：双方各自新增段落，保留 fork 的 ChatGPT/Grok 选择器段落，usage 段落采用上游版本（已含 Antigravity）。`test/login.spec.ts` 的子账号权限测试与上游的 antigravity 登录测试并存。
+
+## 分支策略：只保留 main 与 dev
+
+本仓库常驻分支只有两条：`main`（跟随上游发布）与 `dev`（部署分支，线上跑的就是它）。
+
+任何临时分支——上游同步、部署批次、发布前备份——在工作完成后**合并进 `dev` 并立即删除本地与远端两侧**，不留长期分叉。删除前必须确认该分支的每个提交都能从 `dev` 到达（`git merge-base --is-ancestor <branch> dev`）：提交本身不会因删分支而丢失，但无人可达的提交等同于丢失。
+
+2026-09-12 据此收敛：`codex/internal-013-deploy-20260908`（34 个提交）、`backup/pre-upstream-20260909`、`sync/upstream-20260902` 全部并入 `dev` 后删除。`dev` 落在 `2442684`，与当时线上部署的构件同一提交。
+
+此后引用「部署分支」一律指 `dev`。
