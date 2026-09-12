@@ -3,6 +3,8 @@ import { mkdir, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { PROVIDER_IDS, type ProviderId } from './auth/store.js'
+import type { ProviderPreferences, SubscriptionTool } from './provider-settings-types.js'
+export type { ProviderPreferences, SubscriptionTool } from './provider-settings-types.js'
 
 export const PROVIDER_TOOLS = {
   codex: ['image_generate'],
@@ -10,13 +12,6 @@ export const PROVIDER_TOOLS = {
   grok: ['image_generate', 'video_generate', 'x_search'],
   copilot: [],
 } as const
-export type SubscriptionTool = 'image_generate' | 'video_generate' | 'x_search'
-export interface ProviderPreferences {
-  /** Absent follows discovery; an explicit selection hides newly discovered models. */
-  visibleModels?: string[]
-  contextWindows?: Record<string, number>
-  tools?: Partial<Record<SubscriptionTool, boolean>>
-}
 interface ToolRevision {
   at: number
   provider: ProviderId

@@ -61,7 +61,7 @@ The Grok picker exposes only Grok 4.6 and Grok 4.5. Other Grok entries are remov
 
 Logged-in cards also show **subscription usage** — per rate-limit window (5-hour session, weekly, and per-model weekly where the plan has one) with the used percentage, a progress bar, and the reset time, plus a Refresh button. Codex usage comes from `chatgpt.com/backend-api/wham/usage` (also reports the plan), Claude usage from `api.anthropic.com/api/oauth/usage`, and Grok usage from the Grok Build CLI proxy's `cli-chat-proxy.grok.com/v1/billing` (the source of the CLI's `/usage` panel; reports the shared weekly pool and the subscription tier). Copilot exposes no usage endpoint, so its card shows no usage section.
 
-Provider credentials, account identities, proxy settings, model-default controls, and provider-level usage are administrator-only when the host supplies authenticated account roles. Subaccounts can use models assigned by the host, but the browser does not render login, logout, manual authorization, provider accounts, or quota controls; the server rejects the corresponding direct RPC calls.
+Provider credentials, account identities, proxy settings, model visibility, context windows, tool switches, model-default controls, and provider-level usage are administrator-only when the host supplies authenticated account roles. Subaccounts can use models assigned by the host, but the browser does not render login, logout, manual authorization, provider accounts, or quota controls; the server rejects the corresponding direct RPC calls.
 
 Also included, registered when the matching provider is enabled:
 
@@ -283,3 +283,7 @@ After `pnpm build`, restart `dsh web` to pick up changes.
 - `src/translate/` — dsh `Message[]` ⟷ OpenAI Responses / Anthropic Messages wire formats, SSE → `StreamChunk`
 - `src/tools/` — `x_search`, `image_generate`, and `video_generate`
 - `src/client/` — the Settings → Subscriptions page (browser half, zh/en, theme-token aware)
+
+### Authenticated browser RPC
+
+Settings, usage, speed selection, and generated-media loaders call `/api/subscriptions-auth/<endpoint>` through the shared authenticated connection. The request method includes the `subscriptions-auth/` prefix, matching the Host interceptor. Global provider settings require administrator authority; ordinary accounts retain their assigned model access.

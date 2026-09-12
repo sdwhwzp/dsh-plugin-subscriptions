@@ -52,6 +52,8 @@ export interface ProviderStatus {
 
 /** `status` endpoint value: the node half owns this shape. */
 interface StatusResponse {
+  canManageCredentials: boolean
+  canViewUsage: boolean
   providers: Record<SubscriptionProvider, ProviderStatus>
 }
 
@@ -438,6 +440,8 @@ export function modelDefaultsSignature(
 export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const { rpc } = props
   const t = props.t ?? fallbackTranslate
+  const [canManageCredentials, setCanManageCredentials] = useState(false)
+  const [canViewUsage, setCanViewUsage] = useState(false)
   const [statuses, setStatuses] = useState<Partial<Record<SubscriptionProvider, ProviderStatus>>>({})
   const [errors, setErrors] = useState<Partial<Record<SubscriptionProvider, string>>>({})
   const [manualDrafts, setManualDrafts] = useState<Record<SubscriptionProvider, string>>({
@@ -500,6 +504,8 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     }
     if (!mountedRef.current) return
     setStatuses(response.providers)
+    setCanManageCredentials(response.canManageCredentials)
+    setCanViewUsage(response.canViewUsage)
     for (const { id } of PROVIDERS) {
       const status = response.providers[id]
       if (status.accounts.length > 0 || !status.busy) {
@@ -542,7 +548,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
 
   const loadUsage = useCallback(async (provider: SubscriptionProvider, account: string, force = false): Promise<void> => {
     const key = `${provider}:${account}`
-    if (rpc === undefined || usageInflightRef.current.has(key)) return
+    if (!canViewUsage || rpc === undefined || usageInflightRef.current.has(key)) return
     usageInflightRef.current.add(key)
     setUsageLoading(prev => ({ ...prev, [key]: true }))
     try {
@@ -560,7 +566,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       usageInflightRef.current.delete(key)
       if (mountedRef.current) setUsageLoading(prev => ({ ...prev, [key]: false }))
     }
-  }, [rpc])
+  }, [rpc, canViewUsage])
 
   // Fetch usage once an account is logged in; drop the snapshots of accounts
   // that vanished so a re-login refetches. A failed lookup does not auto-retry
@@ -675,7 +681,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
 
   // Proxy configuration: load once on mount; the dialog drives proxySet/proxyTest.
   useEffect(() => {
-    if (rpc === undefined) return
+    if (rpc === undefined || !canManageCredentials) return
     let alive = true
     void callSubscriptionsAuth<ProxyConfigView>(rpc, 'proxyGet', {}).then((view) => {
       if (!alive) return
@@ -685,7 +691,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       if (alive) setProxyLoadError(messageOf(error))
     })
     return () => { alive = false }
-  }, [rpc])
+  }, [rpc, canManageCredentials])
 
   useEffect(() => {
     if (!proxyOpen) return
@@ -760,7 +766,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   return (
     <div style={styles.section}>
       <p style={styles.intro}>{t('intro')}</p>
-      <div style={styles.proxyCard}>
+      {canManageCredentials && <div style={styles.proxyCard}>
         <div style={styles.cardHeader}>
           <span style={{
             ...styles.dot,
@@ -778,7 +784,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
           </button>
         </div>
         <p style={styles.statusLine}>{proxyStatusText(t, proxy, proxyLoadError)}</p>
-      </div>
+      </div>}
       <div style={styles.separator} />
       {PROVIDERS.map(({ id, name }) => {
         const status = statuses[id]
@@ -802,7 +808,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
               const usageError = usageErrors[usageKey]
               const display = account.account ?? account.key
               // Providers without a usage endpoint answer supported:false — no block.
-              const showUsage = usage?.supported !== false
+              const showUsage = canViewUsage && usage?.supported !== false
                 && (usage !== undefined || usageError !== undefined || usageLoading[usageKey] === true)
               return (
                 <div key={account.key} style={styles.accountRow}>
@@ -882,7 +888,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                 </div>
               )
             })}
-            <div style={styles.actions}>
+            {canManageCredentials && <div style={styles.actions}>
               {!busy && accounts.length === 0 && (
                 <button type="button" style={styles.button} onClick={() => { void login(id) }}>
                   {t('login')}
@@ -908,12 +914,12 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                   {t('cancel')}
                 </button>
               )}
-            </div>
-            {!busy && accounts.length > 0 && (
+            </div>}
+            {canManageCredentials && !busy && accounts.length > 0 && (
               <p style={styles.statusLine}>{t('addAccountHint')}</p>
             )}
-            <ProviderModelEditor provider={id} rpc={rpc} t={t} />
-            {busy && deviceCode !== undefined && (
+            {canManageCredentials && <ProviderModelEditor provider={id} rpc={rpc} t={t} />}
+            {canManageCredentials && busy && deviceCode !== undefined && (
               <div style={styles.deviceCode}>
                 <span style={styles.statusLine}>{t('deviceCodePrompt')}</span>
                 <span style={styles.deviceCodeText}>{deviceCode.userCode}</span>
@@ -931,7 +937,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                 </div>
               </div>
             )}
-            {busy && deviceCode === undefined && (
+            {canManageCredentials && busy && deviceCode === undefined && (
               <details style={styles.manual}>
                 <summary>{t('manualSummary')}</summary>
                 <div style={styles.manualRow}>
@@ -950,7 +956,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
           </div>
         )
       })}
-      {proxyOpen && (
+      {canManageCredentials && proxyOpen && (
         <div style={styles.modalOverlay} onClick={() => setProxyOpen(false)}>
           <div style={styles.modal} onClick={event => event.stopPropagation()}>
             <div style={styles.modalHeader}>

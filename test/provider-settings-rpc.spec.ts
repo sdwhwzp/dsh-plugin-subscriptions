@@ -46,6 +46,13 @@ test('provider settings RPC edits picker visibility without losing the editor ca
     const call = (endpoint: string, payload: unknown) => handler!(endpoint, payload, new AbortController().signal)
     assert.equal((await call('setProviderSettings', { provider: 'codex', settings: { visibleModels: ['m1'], tools: { image_generate: false } } })).ok, true)
     assert.deepEqual((await adapters.get('codex')!.listModels('codex')).map(model => model.id), ['m1'])
+    const child = { source: 'dsh-passwords', id: '2', username: 'child', role: 'user' } as const
+    for (const endpoint of ['providerSettings', 'setProviderSettings']) {
+      const denied = await handler!(endpoint, { provider: 'codex', settings: { visibleModels: ['m2'] } }, new AbortController().signal, child)
+      assert.equal(denied.ok, false)
+      if (!denied.ok) assert.equal(denied.error.code, 'admin-forbidden')
+    }
+    assert.deepEqual((await adapters.get('codex')!.listModels('codex')).map(model => model.id), ['m1'])
     assert.equal((await adapters.get('codex')!.resolveModel('codex', 'm2')).id, 'm2')
     const resolve = adapters.get('codex')!.resolveModel
     adapters.get('codex')!.resolveModel = async (provider, model) => {

@@ -14,7 +14,7 @@
  * structurally (same discipline as platform-modules.d.ts).
  */
 import type { CSSProperties } from 'react'
-import type { ConnectionHandle, RpcResult } from '@deepseek-ai/dsh-api-remotes/client'
+import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import type { ToolCallBlock } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { IconSparkle16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { ImageGallery } from './ImageGallery.js'
@@ -22,8 +22,7 @@ import type { ImageAttachmentRef, ImageLoader, MessageImageLabels } from './Imag
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
 
-/** Logical RPC channel served by the node half of this plugin. */
-const SUBSCRIPTIONS_AUTH_CHANNEL = '/subscriptions-auth'
+import { callSubscriptionsAuth } from './subscriptions-rpc.js'
 
 /** Title prompt truncation budget (characters). */
 const PROMPT_MAX_LENGTH = 60
@@ -64,19 +63,6 @@ export type ImageGenerateToolviewProps =
 interface ImageEndpointResult {
   mediaType: string
   dataBase64: string
-}
-
-/**
- * Call one `/subscriptions-auth` endpoint and unwrap the business result.
- * @param rpc - Connection RPC caller.
- * @param endpoint - channel-relative endpoint.
- * @param payload - channel-owned request payload.
- * @returns the success value, cast by the caller to the endpoint's shape.
- */
-async function callSubscriptionsAuth<T>(rpc: ConnectionHandle['rpc'], endpoint: string, payload: unknown): Promise<T> {
-  const result: RpcResult<unknown> = await rpc.call(SUBSCRIPTIONS_AUTH_CHANNEL, endpoint, payload)
-  if (!result.ok) throw new Error(result.error.message)
-  return result.value as T
 }
 
 /**

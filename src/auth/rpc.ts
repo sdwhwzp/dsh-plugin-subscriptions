@@ -449,9 +449,11 @@ async function dispatch(
 ): Promise<RpcResult<unknown>> {
   switch (endpoint) {
     case 'providerSettings':
+      assertCanManageCredentials(principal)
       if (!providerSettings) throw new BadRequest('provider settings are unavailable')
       return ok(await providerSettings.get(readProvider(payload), readForce(payload)))
     case 'setProviderSettings': {
+      assertCanManageCredentials(principal)
       if (!providerSettings) throw new BadRequest('provider settings are unavailable')
       const provider = readProvider(payload)
       await providerSettings.set(provider, (payload as Record<string, unknown>).settings)
