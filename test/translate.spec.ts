@@ -19,6 +19,7 @@ import {
   AnthropicStreamTranslator,
   CLAUDE_CODE_IDENTITY,
   markMessageCache,
+  anthropicToolId,
   toAnthropicMessages,
   toAnthropicSystem,
   toAnthropicTools,
@@ -349,6 +350,47 @@ test('Responses translator: response.failed maps context overflow and quota', ()
     () => generic.push({ type: 'error', code: 'server_error', message: 'boom' }),
     (error: unknown) => error instanceof LlmError && error.code === 'SERVER',
   )
+})
+
+test('anthropicToolId: a valid id is untouched, an illegal one is rewritten injectively', () => {
+  // An id the API already accepts must not move: rewriting every id would
+  // churn the cache prefix on conversations that were never broken.
+  for (const ok of ['call_00_9GCGV99j5qknxwV6hAYY5595', 'toolu-1', 'a', '_-_']) {
+    assert.equal(anthropicToolId(ok), ok)
+  }
+
+  // The shape an OpenAI-compatible endpoint actually emitted here.
+  const raw = 'call_OQUs68m6wgRwPtBT4F1YsR0WkBJQsSek|fc_OQUs68m6wgRwPtBT4F1YsR0WkBJQsSek'
+  const mapped = anthropicToolId(raw)
+  assert.match(mapped, /^[a-zA-Z0-9_-]+$/)
+  assert.equal(anthropicToolId(raw), mapped, 'stable for a given input')
+
+  // Ids that differ only in an illegal character must not collapse onto one,
+  // or a result would answer the wrong call.
+  assert.notEqual(anthropicToolId('a.b'), anthropicToolId('a-b'))
+  assert.notEqual(anthropicToolId('x|y'), anthropicToolId('x/y'))
+  for (const odd of ['', '|', '中文 id', 'a'.repeat(400) + '|z']) {
+    assert.match(anthropicToolId(odd), /^[a-zA-Z0-9_-]+$/, JSON.stringify(odd))
+  }
+})
+
+test('toAnthropicMessages: an illegal tool id is rewritten on the call and its result alike', () => {
+  // A conversation that ran on another provider replays ids Claude never
+  // minted; the pair must still match after the rewrite or the API rejects it.
+  const raw = 'call_OQUs68m6wgRwPtBT4F1YsR0WkBJQsSek|fc_OQUs68m6wgRwPtBT4F1YsR0WkBJQsSek'
+  const messages = toAnthropicMessages([
+    message('assistant', [toolCall(raw, 'bash', '{"cmd":"ls"}')]),
+    message('user', [toolResult(raw, 'done', false)]),
+  ])
+  const use = messages.flatMap((m) => m.content).find((b) => b.type === 'tool_use')
+  const result = messages.flatMap((m) => m.content).find((b) => b.type === 'tool_result')
+  assert.ok(use && result)
+  // The block union widens `id` through `find`, so both sides are compared as
+  // the strings the wire carries.
+  const useId = String(use.id)
+  assert.match(useId, /^[a-zA-Z0-9_-]+$/)
+  assert.equal(String(result.tool_use_id), useId, 'the result still answers its call')
+  assert.notEqual(useId, raw)
 })
 
 test('toAnthropicMessages: merge, tool_use input parsing, tool_result', () => {

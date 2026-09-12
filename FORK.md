@@ -57,3 +57,15 @@ model (the state the UI already renders as a hidden toggle and an unavailable
 
 Upstream can carry this as an ordinary config field; offer it upstream before
 carrying the divergence further.
+
+## `anthropicToolId` —— 跨供应商工具 id 的字符清洗
+
+Anthropic 要求 `tool_use.id` 匹配 `^[a-zA-Z0-9_-]+$`。工具调用 id 由**发起那次调用的供应商**生成，而一段会话可以换模型继续，于是 Claude 会收到自己从未签发过的 id。本部署的本地 OpenAI 兼容端点（`qwen3.8-27b-q4`）发的是 `call_<token>|fc_<token>`，其中的管道符让整个请求被拒：
+
+```
+HTTP 400 messages.1.content.0.tool_use.id: String should match pattern '^[a-zA-Z0-9_-]+$'
+```
+
+`src/translate/anthropic.ts` 里 `tool_use.id` 与 `tool_result.tool_use_id` 现在走同一个 `anthropicToolId`：合法 id 原样返回，非法 id 清洗为合法字符再缀上原串的 sha256(base64url) 前缀。缀哈希不是装饰——只把非法字符统一替换成 `_` 会让 `a.b` 与 `a-b` 塌成同一个 id，结果就会答到错误的调用上；base64url 的字母表恰好等于允许集合，不会重新引入问题。
+
+两侧必须走同一个函数：Anthropic 校验的是「结果的 `tool_use_id` 是否等于前面某个 `tool_use.id`」，只改一侧会把字符错误换成配对错误。合并上游时若改动消息装配，须保持这一点。

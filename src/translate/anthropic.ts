@@ -18,6 +18,7 @@ import type {
   ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import { parseSse } from './sse.js'
+import { createHash } from 'node:crypto'
 import type { ResolvedToolResultBlock, TranslatableMessage } from './resolved.js'
 
 /**
@@ -82,6 +83,37 @@ function parseToolInput(raw: string): Record<string, unknown> {
     // The model produced malformed JSON; an empty object keeps the request valid.
     return {}
   }
+}
+
+/** Characters Anthropic accepts in a tool-use id. */
+const ANTHROPIC_TOOL_ID = /^[a-zA-Z0-9_-]+$/
+
+/** How much of the original id survives beside the digest. */
+const TOOL_ID_STEM = 48
+
+/**
+ * One tool-call id in the character set Anthropic accepts.
+ *
+ * The id belongs to whichever provider issued the call, and a conversation
+ * that moves onto Claude replays ids Claude never minted: an OpenAI-compatible
+ * endpoint answering `call_<token>|fc_<token>` makes the API reject the whole
+ * request over one pipe. Rewriting is not enough on its own — the rewritten
+ * `tool_use.id` must still equal the `tool_use_id` on the result that answers
+ * it, or Anthropic rejects the pair instead of the character — so both sides
+ * run through this one function and a valid id passes through untouched.
+ *
+ * The digest is what keeps the mapping injective: collapsing every illegal
+ * character to `_` alone would map `a.b` and `a-b` onto one id and silently
+ * pair a result with the wrong call. base64url emits exactly the accepted
+ * alphabet, so the suffix never reintroduces the problem.
+ * @param raw - the id as the issuing provider wrote it.
+ * @returns an id Anthropic accepts, stable for a given input.
+ */
+export function anthropicToolId(raw: string): string {
+  if (ANTHROPIC_TOOL_ID.test(raw)) return raw
+  const stem = raw.replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, TOOL_ID_STEM)
+  const digest = createHash('sha256').update(raw).digest('base64url').slice(0, 10)
+  return `${stem}_${digest}`
 }
 
 /**
@@ -168,7 +200,7 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[]): A
           blocks.push(role === 'assistant'
             ? {
                 type: 'tool_use',
-                id: String(block.id),
+                id: anthropicToolId(String(block.id)),
                 name: block.name,
                 input: parseToolInput(block.arguments),
               }
@@ -177,7 +209,7 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[]): A
         case 'tool-result':
           blocks.push({
             type: 'tool_result',
-            tool_use_id: String(block.toolCallId),
+            tool_use_id: anthropicToolId(String(block.toolCallId)),
             content: toolResultContent(block),
             ...block.isError === true ? { is_error: true } : {},
           })
