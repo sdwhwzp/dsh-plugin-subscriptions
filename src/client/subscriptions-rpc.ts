@@ -3,21 +3,22 @@ import type { ConnectionHandle, RpcResult } from '@deepseek-ai/dsh-api-remotes/c
 const SUBSCRIPTIONS_AUTH_CHANNEL = '/api'
 const SUBSCRIPTIONS_AUTH_PREFIX = 'subscriptions-auth/'
 
-/** Business error returned by the `/subscriptions-auth` channel (error branch message). */
+/** Business error returned by a `subscriptions-auth` endpoint (error branch message). */
 export class SubscriptionsAuthError extends Error {}
 
 /**
- * Call one authenticated `/api/subscriptions-auth` endpoint and unwrap the business result.
- * Shared by the settings section and the composer Speed toggle.
+ * Call one `subscriptions-auth` endpoint and unwrap the business result.
+ * Shared by the settings section, the composer Speed toggle, the usage
+ * badge, and the image/video toolviews.
  * @param rpc - Connection RPC caller.
- * @param endpoint - channel-relative endpoint.
- * @param payload - channel-owned request payload.
+ * @param endpoint - endpoint name (`status`, `usage`, `image`, ...).
+ * @param payload - endpoint-owned request payload.
  * @returns the success value, cast by the caller to the endpoint's shape.
  */
 export async function callSubscriptionsAuth<T>(rpc: ConnectionHandle['rpc'], endpoint: string, payload: unknown): Promise<T> {
   let result: RpcResult<unknown>
   try {
-    result = await rpc.call(SUBSCRIPTIONS_AUTH_CHANNEL, SUBSCRIPTIONS_AUTH_PREFIX + endpoint, payload)
+    result = await rpc.call(SUBSCRIPTIONS_AUTH_CHANNEL, `${SUBSCRIPTIONS_AUTH_PREFIX}${endpoint}`, payload)
   } catch (error) {
     // The transport rejected rather than answering; surface the same way.
     throw new SubscriptionsAuthError(error instanceof Error ? error.message : String(error))

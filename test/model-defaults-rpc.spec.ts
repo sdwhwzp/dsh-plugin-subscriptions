@@ -15,6 +15,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
 import type { RpcResult } from '../src/compat.js'
+import { createFakeConnection } from './fake-connection.js'
 
 const HOME = mkdtempSync(join(tmpdir(), 'model-defaults-rpc-test-'))
 
@@ -41,7 +42,6 @@ async function mount(options: { tier?: string } = {}): Promise<{ handler: Connec
   assert.ok(modelDefaultsFilePath().startsWith(HOME), 'the store resolves inside this spec\'s temp home')
   await resetModelDefaultsForTests()
   rmSync(modelDefaultsFilePath(), { force: true })
-  let handler: ConnectionRpcHandler | undefined
   const fake: FakeLlm = { registered: [], replaced: [], catalogClears: 0 }
   const ctx = new Context()
   const listed = [{ id: 'gpt-5.6-sol', name: 'GPT-5.6-Sol' }]
@@ -73,17 +73,8 @@ async function mount(options: { tier?: string } = {}): Promise<{ handler: Connec
     },
   }
   ctx.provide('llm', fakeLlm)
-  ctx.provide('connection', {
-    rpc: {
-      // This plugin owns a prefix on the shared authenticated channel, so the
-      // stub records the interceptor and re-adds the prefix the tests omit.
-      intercept: (_channel: string, _matches: (endpoint: string) => boolean, h: ConnectionRpcHandler) => {
-        handler = ((endpoint, payload, signal, principal) =>
-          h(`subscriptions-auth/${endpoint}`, payload, signal, principal)) as ConnectionRpcHandler
-        return () => Promise.resolve()
-      },
-    },
-  })
+  const connection = createFakeConnection()
+  ctx.provide('connection', connection.connection)
   ctx.plugin(plugin, {
     providers: ['codex'],
     ...options.tier === undefined ? {} : {
@@ -91,8 +82,8 @@ async function mount(options: { tier?: string } = {}): Promise<{ handler: Connec
     },
   })
   await new Promise(resolve => setTimeout(resolve, 50))
-  assert.ok(handler !== undefined, 'the shared-channel subscriptions-auth interceptor was registered')
-  return { handler, fake }
+  assert.ok(connection.registered(), 'the subscriptions-auth routes were registered')
+  return { handler: connection.handler, fake }
 }
 
 async function call(

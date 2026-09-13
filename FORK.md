@@ -5,13 +5,12 @@ and why upstream cannot carry it.
 
 ## Authorization on a shared, authenticated channel
 
-Upstream registers its endpoints on a channel of its own with `loopback`
-authority. This deployment puts every account behind one gateway, and that
-gateway forwards a fixed prefix list, so a private channel never reaches the
-Host at all — and `loopback` authority on one would admit every signed-in
-account to the owner's provider credentials.
+Upstream uses exact POST Fetch routes under `/api/subscriptions-auth.<endpoint>`.
+This deployment requires the gateway's verified account identity on every
+credential-management and quota request. The Fetch handler does not supply that
+identity to the dispatcher.
 
-The endpoints therefore ride the shared `/api` channel through
+The fork endpoints ride the shared `/api` channel through
 `connection.rpc.intercept` under the `subscriptions-auth/` prefix, which is the
 only path that carries the caller's transport-verified principal. Two role
 checks act on it: only an administrator may change provider login credentials or
@@ -70,11 +69,12 @@ HTTP 400 messages.1.content.0.tool_use.id: String should match pattern '^[a-zA-Z
 
 两侧必须走同一个函数：Anthropic 校验的是「结果的 `tool_use_id` 是否等于前面某个 `tool_use.id`」，只改一侧会把字符错误换成配对错误。合并上游时若改动消息装配，须保持这一点。
 
-## Antigravity 合并的适配点
+## Shared RPC test transport
 
-合并 `upstream/feat/antigravity-subscription` 时，上游新增的 `test/provider-settings-rpc.spec.ts` 用 `rpc.handle` 桩连接，而本 fork 按 §1 注册在共享认证通道上的 `rpc.intercept`，于是 handler 永远为空。该测试已改用与本仓其他 RPC 测试相同的 intercept 桩（记录拦截器并补回端点前缀）。上游若把这套测试并进 main，合并时需要重复这一处适配。
-
-README 的三处冲突同理：双方各自新增段落，保留 fork 的 ChatGPT/Grok 选择器段落，usage 段落采用上游版本（已含 Antigravity）。`test/login.spec.ts` 的子账号权限测试与上游的 antigravity 登录测试并存。
+`test/fake-connection.ts` records the shared-channel interceptor, applies its
+endpoint predicate, and forwards the test caller's verified principal. The
+login, usage, model-default and provider-settings cases use this common helper;
+subaccount refusals stay covered alongside upstream provider and usage cases.
 
 ## 分支策略：只保留 main 与 dev
 

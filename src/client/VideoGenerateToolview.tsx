@@ -18,10 +18,9 @@ import type { CSSProperties } from 'react'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import type { ToolCallBlock } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { IconSparkle16 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { callSubscriptionsAuth } from './subscriptions-rpc.js'
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
-
-import { callSubscriptionsAuth } from './subscriptions-rpc.js'
 
 /** Title prompt truncation budget (characters). */
 const PROMPT_MAX_LENGTH = 60

@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
+import { createFakeConnection } from './fake-connection.js'
 
 process.env.DSH_HOME ??= mkdtempSync(join(tmpdir(), 'router-usage-test-'))
 
@@ -278,24 +279,14 @@ test('fetchGrokUsage tolerates a null config and non-2xx responses', async () =>
 
 /** Mount the plugin with fake llm/connection; return the RPC handler. */
 async function mount(): Promise<ConnectionRpcHandler> {
-  let handler: ConnectionRpcHandler | undefined
   const ctx = new Context()
   ctx.provide('llm', { registerAdapter: () => Object.assign(() => {}, { replace: () => {} }) })
-  ctx.provide('connection', {
-    rpc: {
-      // This plugin owns a prefix on the shared authenticated channel, so the
-      // stub records the interceptor and re-adds the prefix the tests omit.
-      intercept: (_channel: string, _matches: (endpoint: string) => boolean, h: ConnectionRpcHandler) => {
-        handler = ((endpoint, payload, signal, principal) =>
-          h(`subscriptions-auth/${endpoint}`, payload, signal, principal)) as ConnectionRpcHandler
-        return () => Promise.resolve()
-      },
-    },
-  })
+  const fake = createFakeConnection()
+  ctx.provide('connection', fake.connection)
   ctx.plugin(plugin, { providers: ['codex'] })
   await new Promise(resolve => setTimeout(resolve, 50))
-  assert.ok(handler !== undefined, 'the shared-channel subscriptions-auth interceptor was registered')
-  return handler
+  assert.ok(fake.registered(), 'the subscriptions-auth routes were registered')
+  return fake.handler
 }
 
 test('usage endpoint: provider without a usage fetcher answers supported:false', async () => {
