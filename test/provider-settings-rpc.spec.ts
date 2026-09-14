@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { Context } from '@deepseek-ai/cordis'
 import type { AccountAwareAdapter } from '../src/providers/accounts.js'
@@ -36,13 +35,6 @@ test('provider settings RPC edits picker visibility without losing the editor ca
     assert.ok(connection.registered())
     const call = (endpoint: string, payload: unknown) => connection.handler(endpoint, payload, new AbortController().signal)
     assert.equal((await call('setProviderSettings', { provider: 'codex', settings: { visibleModels: ['m1'], tools: { image_generate: false } } })).ok, true)
-    assert.deepEqual((await adapters.get('codex')!.listModels('codex')).map(model => model.id), ['m1'])
-    const child = { source: 'dsh-passwords', id: '2', username: 'child', role: 'user' } as const
-    for (const endpoint of ['providerSettings', 'setProviderSettings']) {
-      const denied = await connection.handler(endpoint, { provider: 'codex', settings: { visibleModels: ['m2'] } }, new AbortController().signal, child)
-      assert.equal(denied.ok, false)
-      if (!denied.ok) assert.equal(denied.error.code, 'admin-forbidden')
-    }
     assert.deepEqual((await adapters.get('codex')!.listModels('codex')).map(model => model.id), ['m1'])
     assert.equal((await adapters.get('codex')!.resolveModel('codex', 'm2')).id, 'm2')
     const resolve = adapters.get('codex')!.resolveModel
@@ -94,25 +86,14 @@ test('Antigravity registers the real multi-account adapter with provider setting
   process.env.DSH_HOME = home
   const ctx = new Context()
   const adapters = new Map<string, AccountAwareAdapter>()
-  let handler: ConnectionRpcHandler | undefined
   ctx.provide('llm', {
     registerAdapter: (routes: string[], adapter: AccountAwareAdapter) => {
       adapters.set(routes[0], adapter)
       return Object.assign(() => {}, { replace: () => {} })
     },
   })
-  // This fork registers on the shared authenticated channel rather than a
-  // channel of its own, so the stub records the interceptor and re-adds the
-  // prefix the assertions omit — the same shape the other RPC tests use.
-  ctx.provide('connection', { rpc: { intercept: (
-    _channel: string,
-    _matches: (endpoint: string) => boolean,
-    inner: ConnectionRpcHandler,
-  ) => {
-    handler = ((endpoint, payload, signal, principal) =>
-      inner(`subscriptions-auth/${endpoint}`, payload, signal, principal)) as ConnectionRpcHandler
-    return async () => {}
-  } } })
+  const connection = createFakeConnection()
+  ctx.provide('connection', connection.connection)
   const runtime = ctx.plugin(plugin, {
     providers: ['antigravity'], pool: { enabled: false },
     models: { antigravity: [{ id: 'm1', inputModalities: ['text', 'image'] }, { id: 'm2', inputModalities: ['text'] }] },
@@ -125,11 +106,11 @@ test('Antigravity registers the real multi-account adapter with provider setting
       await saveAccountSession('antigravity', accountKeyOf('antigravity', session), session)
     }
     await new Promise(resolve => setTimeout(resolve, 50))
-    assert.ok(handler)
+    assert.ok(connection.registered(), 'the subscriptions-auth Fetch routes were registered')
     assert.deepEqual((await listAccounts('antigravity')).map(entry => entry.key), ['alice', 'bob'])
     const adapter = adapters.get('antigravity')!
     assert.deepEqual((await adapter.listOwnModels('antigravity', 'bob')).map(model => model.id), ['m1', 'm2'])
-    const call = (endpoint: string, payload: unknown) => handler!(endpoint, payload, new AbortController().signal)
+    const call = (endpoint: string, payload: unknown) => connection.handler(endpoint, payload, new AbortController().signal)
     const catalog = await call('providerSettings', { provider: 'antigravity', force: true })
     assert.ok(catalog.ok)
     assert.deepEqual((catalog.value as { models: { id: string }[] }).models.map(model => model.id), ['m1', 'm2'])

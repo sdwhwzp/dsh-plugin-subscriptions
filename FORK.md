@@ -69,6 +69,21 @@ HTTP 400 messages.1.content.0.tool_use.id: String should match pattern '^[a-zA-Z
 
 两侧必须走同一个函数：Anthropic 校验的是「结果的 `tool_use_id` 是否等于前面某个 `tool_use.id`」，只改一侧会把字符错误换成配对错误。合并上游时若改动消息装配，须保持这一点。
 
+## One React copy across the sibling checkouts
+
+Upstream's `test/subscription-usage-badge.spec.ts` renders a client component
+through `renderToStaticMarkup`. The component reaches `@deepseek-ai/dsh-client-ui-*`,
+which this fork resolves by `link:` to the sibling Harness checkout, so that
+package's `react/jsx-runtime` loads the Harness tree's React while the spec's
+`react-dom/server` is bound to this package's own. Two React instances crash the
+render with `Cannot read properties of undefined (reading 'ReactCurrentDispatcher')`.
+
+`react` and `react-dom` therefore `link:` to the Harness virtual store's hoist
+directory, the same physical copy the linked packages use. A deployed plugin
+never sees this: it runs inside the Harness's own `node_modules`, where one
+React already serves everything. `react-dom` is also declared here because the
+spec imports `react-dom/server` and upstream relies on hoisting for it.
+
 ## Shared RPC test transport
 
 `test/fake-connection.ts` records the shared-channel interceptor, applies its
