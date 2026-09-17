@@ -3,8 +3,8 @@ import { mkdir, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { PROVIDER_IDS, type ProviderId } from './auth/store.js'
-import type { ProviderPreferences, SubscriptionTool } from './provider-settings-types.js'
-export type { ProviderPreferences, SubscriptionTool } from './provider-settings-types.js'
+import type { AccountPreferences, ProviderPreferences, SubscriptionTool } from './provider-settings-types.js'
+export type { AccountPreferences, ProviderPreferences, SubscriptionTool } from './provider-settings-types.js'
 
 export const PROVIDER_TOOLS = {
   codex: ['image_generate'],
@@ -13,6 +13,7 @@ export const PROVIDER_TOOLS = {
   copilot: [],
   antigravity: [],
 } as const
+
 interface ToolRevision {
   at: number
   provider: ProviderId
@@ -27,6 +28,30 @@ export function validatePreferences(provider: ProviderId, input: unknown): Provi
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('settings must be an object')
   const raw = input as Record<string, unknown>
   const result: ProviderPreferences = {}
+  if (raw.accounts !== undefined) {
+    if (!raw.accounts || typeof raw.accounts !== 'object' || Array.isArray(raw.accounts)) throw new Error('accounts must be an account-to-preferences map')
+    result.accounts = Object.create(null) as Record<string, AccountPreferences>
+    for (const [key, value] of Object.entries(raw.accounts)) {
+      if (!key.trim() || !value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid account preferences')
+      const account = value as Record<string, unknown>
+      const parsed: AccountPreferences = {}
+      if (account.alias !== undefined) {
+        if (typeof account.alias !== 'string') throw new Error('account alias must be a string')
+        parsed.alias = account.alias.trim()
+      }
+      for (const field of ['poolEnabled', 'independentEntry'] as const) {
+        if (account[field] !== undefined) {
+          if (typeof account[field] !== 'boolean') throw new Error(`${field} must be a boolean`)
+          parsed[field] = account[field]
+        }
+      }
+      if (account.poolModels !== undefined) {
+        if (!Array.isArray(account.poolModels) || account.poolModels.some(id => typeof id !== 'string' || !id.trim())) throw new Error('poolModels must be an array of model ids')
+        parsed.poolModels = [...new Set(account.poolModels as string[])]
+      }
+      result.accounts[key] = parsed
+    }
+  }
   if (raw.visibleModels !== undefined) {
     if (!Array.isArray(raw.visibleModels) || raw.visibleModels.some(id => typeof id !== 'string' || !id.trim())) {
       throw new Error('visibleModels must be an array of model ids')
