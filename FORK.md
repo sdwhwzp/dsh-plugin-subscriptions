@@ -100,3 +100,7 @@ subaccount refusals stay covered alongside upstream provider and usage cases.
 2026-09-12 据此收敛：`codex/internal-013-deploy-20260908`（34 个提交）、`backup/pre-upstream-20260909`、`sync/upstream-20260902` 全部并入 `dev` 后删除。`dev` 落在 `2442684`，与当时线上部署的构件同一提交。
 
 此后引用「部署分支」一律指 `dev`。
+
+## Codex workspace identities
+
+Codex accounts use the upstream workspace-and-user key and preserve aliases for existing credentials and pool members. Separate users in one workspace remain separate accounts; token refresh follows the canonical identity. Gateway account authorization and the fast-tier restriction still apply.
