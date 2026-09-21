@@ -18,6 +18,8 @@ import type {
 } from '@deepseek-ai/dsh-llm'
 // Type-only: activates the `ctx.tools` Context merge for the inject block.
 import type {} from '@deepseek-ai/dsh-tools'
+// Type-only: activates the `ctx.web` Context merge for optional registration.
+import type {} from '@deepseek-ai/dsh-web'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { OAuthFlowManager, type OAuthAttempt } from './auth/oauth-flow.js'
 import { DeviceFlowManager, type DeviceAttempt } from './auth/device-flow.js'
@@ -67,6 +69,7 @@ import { DEFAULT_RATE_LIMIT_MAX_WAIT_MS, resolveRateLimitWait } from './provider
 import type { RateLimitConfig } from './providers/rate-limit.js'
 import { catalogStore } from './providers/catalog-store.js'
 import { CodexClientVersionCache } from './providers/codex-client-version.js'
+import { CodexWebSearchProvider } from './providers/codex-search.js'
 import { PoolAdapter } from './providers/pool.js'
 import { AccountPreferencesAdapter, accountAllowsPool, accountModelId, parseAccountModelId } from './providers/account-preferences.js'
 export type { AccountPreferences, ProviderPreferences } from './provider-settings.js'
@@ -1196,6 +1199,26 @@ export function apply(ctx: Context, config: Config): void {
       }, () => undefined)
     }, 5 * 60_000)
     ctx.effect(() => () => { clearInterval(syncTimer) }, 'dsh-plugin-subscriptions: claude background sync timer')
+  }
+
+  // `web` is optional on headless/minimal compositions. Register Codex behind
+  // DSH's native web_search tool when the capability seam is mounted.
+  //
+  // `web_search` is the host's tool, not one this plugin registers, so the
+  // Codex switch gates this provider's `available()` rather than the tool
+  // itself: turned off, the seam auto-selects another registered provider, or
+  // reports WEB_PROVIDER_UNAVAILABLE the way dsh-tool-web expects. Denying the
+  // tool per agent would instead take web_search away from every other
+  // provider in the composition.
+  if (codexTokens !== undefined) {
+    const tokens = codexTokens
+    ctx.inject(['web'], webCtx => {
+      webCtx.web.registerSearchProvider(new CodexWebSearchProvider({
+        tokens,
+        enabled: () => preferences.toolEnabled('codex', 'web_search'),
+        fetchFn: proxiedFetch,
+      }))
+    })
   }
 
   // `tools` is optional (headless/minimal compositions may not mount it), so

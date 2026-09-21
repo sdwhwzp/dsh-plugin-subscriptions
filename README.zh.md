@@ -66,6 +66,7 @@
 
 随 provider 启用自动注册的工具:
 
+- **`web_search`** 搜索提供商(Codex)—— 通过 DSH 原生的 `web_search` 工具和引用界面使用 Codex 托管的网页搜索,复用默认 Codex 账号和插件的代理配置。它只是注册到宿主 `web` 能力位上的候选之一,不会独占:未挂载其他搜索提供商时 DSH 自动选中它,与其他提供商共存时由宿主自己的 `web.searchProvider` 配置决定优先级。在 Codex 的 **Provider tools** 里关闭 **Web search** 只会撤回本提供商,宿主的 `web_search` 工具仍归其余已注册的提供商使用。
 - **`x_search`**(Grok)—— xAI 托管的 X 搜索,返回 `{ answer, citations }`。
 - **`image_generate`**(ChatGPT 或 Grok)—— 经 Codex 后端调用 `gpt-image-2`,或经 `api.x.ai/v1/images/generations` 调用 `grok-imagine-image-2.0`。`provider` 参数指定首选提供方(`gpt` 为默认值,可选 `grok`);首选方未登录时自动回退到另一方。图片保存到 `~/.dsh/plugins/subscriptions/images/` 并返回路径。Grok 路径上 `size`/`quality` 参数会映射为 Grok 的 `aspect_ratio`/`quality`。
 - **`video_generate`**(Grok)—— 经 `api.x.ai/v1/videos` 调用 `grok-imagine-video-1.5`(异步提交 + 轮询);MP4 保存到 `~/.dsh/plugins/subscriptions/videos/` 并返回路径,视频直接在对话里内联播放。支持时长(1–15 秒)、宽高比、分辨率,以及通过 `image_url` 做图生视频。
@@ -202,6 +203,7 @@ Antigravity 为 Gemini 使用 `parametersJsonSchema`，为 Claude/GPT-OSS 使用
 - **共有模型**：至少两个账号的目录都列出的模型,在这些账号之间 failover(粘性、可按配额调度)。每个账号各自做一次目录发现,Plus 不会被拿去打 Pro 才有的模型。
 - **单账号模型**：只有一个账号目录里有的模型,请求就打到那个账号。即使它不是默认账号,选择器里也会出现。
 - **显式账号列表(`families`)**：覆盖某个目录模型的自动成员(仅同一 provider;跨 provider 的成员会被忽略)。可钉 `account`,省略则用默认账号。
+  `account` 填 `status` 接口返回的稳定账号 key——Claude 是邮箱,Grok / Copilot / Antigravity 是登录名。Codex 的 key 同时包含 workspace 和用户(`["<workspace-id>","user","<user-id>"]`),因此 Codex 也可以直接填登录邮箱,或在该 workspace 只登录了一个用户时填 workspace ID;有歧义的引用不会解析到任何账号,以免打到别人的账号。
 - **档位额外项(`tiers`,可选)**：额外的选择器条目,failover 可以跨模型;出现在首个成员所在的 provider 分组。不会自动创建。
 
 成员选择按会话粘性(prompt 缓存不失效),两种策略:`priority`(按顺序取第一个健康成员)和 `quota_aware`(默认——按"必需消耗速率 = 剩余配额 / 距重置时间"给成员打分,快重置且剩余多的窗口优先被用掉而不是浪费;粘性成员除非被挑战者以 `switchMargin` 倍分差击败否则不换)。任一用量窗口超过 95% 的成员会被硬门槛挡下;首个流式 chunk 之前的失败会记冷却并切换下一家(provider 给了 `retry-after` 就用它)——配额与认证类失败按整个账号冷却(配额是账号级的;Claude 的分模型窗口则只冷却出错成员),瞬时服务端失败只冷却出错成员。Copilot 没有用量接口,恒为 0 分,自然充当最后的保底。
@@ -272,15 +274,15 @@ DSH `v0.1.3-alpha.1` 新增宿主统一代理支持。建议在启动环境或 `
 
 ## 开发
 
-`0.6.4` 面向 DeepSeek Harness `0.1.3-alpha.1`，Harness peer 依赖声明为 `^0.1.3-alpha.1`。浏览器端使用当前 API Remotes 与 Client Store 平台模块，不再依赖已移除的 `dsh-client-runtime`；Host Remote 失败使用带命名空间错误码。
+本 fork 的 Harness 开发依赖通过链接指向相邻的 `deepseek-harness` 检出。Host 和 Client 的 TypeScript 项目分别编译；`pnpm build` 将声明输出到 `lib/types/`，并打包两个运行时入口。
 
 ```sh
-pnpm install   # devDependencies 通过 link: 指向相邻的 deepseek-harness 0.1.3-alpha.1 检出
-pnpm build     # tsc(lib/)+ tsdown(lib/client.js 浏览器 bundle)
+pnpm install   # devDependencies 通过 link: 指向相邻的 deepseek-harness 检出
+pnpm build     # tsc -b (lib/types/) + tsdown (lib/index.js 和 lib/client.js)
 pnpm test      # 编译后跑 node --test 单测
 ```
 
-`prepare` 执行 `pnpm run build`，与本地开发一样要求相邻的 Harness 检出。部署环境没有该检出时，应安装包含 `lib/` 的预构建 npm 包或发布 tarball。
+`prepare` 打包 Host 和 Client 的运行时入口，不执行 TypeScript 项目编译。开发和生成类型声明需要相邻的 Harness 检出。部署环境没有该检出时，应安装包含 `lib/` 的预构建包或发布 tarball。
 
 改了代码后 `pnpm build` 并重启 `dsh web` 生效。
 

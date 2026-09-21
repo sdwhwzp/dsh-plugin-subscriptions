@@ -1,5 +1,5 @@
 /** Provider preferences shared by the Host store and browser editor. */
-export type SubscriptionTool = 'image_generate' | 'video_generate' | 'x_search'
+export type SubscriptionTool = 'image_generate' | 'video_generate' | 'x_search' | 'web_search'
 export interface AccountPreferences {
   alias?: string
   poolEnabled?: boolean

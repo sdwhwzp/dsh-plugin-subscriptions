@@ -7,7 +7,7 @@ import type { AccountPreferences, ProviderPreferences, SubscriptionTool } from '
 export type { AccountPreferences, ProviderPreferences, SubscriptionTool } from './provider-settings-types.js'
 
 export const PROVIDER_TOOLS = {
-  codex: ['image_generate'],
+  codex: ['image_generate', 'web_search'],
   claude: [],
   grok: ['image_generate', 'video_generate', 'x_search'],
   copilot: [],

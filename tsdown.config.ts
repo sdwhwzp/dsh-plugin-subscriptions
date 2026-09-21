@@ -4,8 +4,8 @@
  * function clientConfig) for this out-of-tree plugin: the bundle calls
  * window.__ModuleLoader__.load({id, factory}) and resolves externals through
  * the injected require (the shell's loader module table). The node half
- * (lib/index.js) is emitted by tsc, not here — `clean` stays off so this
- * bundle never wipes it.
+ * (lib/index.js) is bundled by tsdown.prepare.config.ts. `clean` stays off
+ * so this bundle preserves it and the declarations under lib/types/.
  */
 import { defineConfig } from 'tsdown'
 
@@ -41,12 +41,12 @@ const GENERATED_REMOTE = /^@deepseek-ai\/dsh-[a-z0-9]+(?:-[a-z0-9]+)*\/remote$/
 export default defineConfig({
   name: 'dsh-plugin-subscriptions/client',
   entry: { client: 'src/client/index.ts' },
-  // Single lib/ artifact dir shared with the tsc-emitted node half;
+  // Single lib/ artifact dir shared with the bundled node half;
   // entryFileNames pins the bundle at exactly lib/client.js.
   outDir: 'lib',
   format: 'cjs',
   platform: 'browser',
-  // Types ship from tsc (lib/client/index.d.ts); dts here would wrap the
+  // Types ship from tsc (lib/types/client/index.d.ts); dts here would wrap the
   // banner/footer into .d.cts and break parsing.
   dts: false,
   sourcemap: true,
