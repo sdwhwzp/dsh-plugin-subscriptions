@@ -17,7 +17,7 @@ import { useEffect, useState } from 'react'
 import type { CSSProperties } from 'react'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import type { ToolCallBlock } from '@deepseek-ai/dsh-client-ui-conversation/client'
-import { IconSparkle16 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconSparkleRegular } from '@deepseek-ai/dsh-client-ui-primitives'
 import { callSubscriptionsAuth } from './subscriptions-rpc.js'
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
@@ -206,7 +206,7 @@ export function VideoGenerateToolview(props: VideoGenerateToolviewProps) {
   return (
     <div style={styles.container}>
       <div style={styles.row}>
-        <span style={styles.icon}><IconSparkle16 size={14} /></span>
+        <span style={styles.icon}><IconSparkleRegular size={14} /></span>
         <span style={styles.title}>{title}</span>
       </div>
       {!settled && <p style={styles.subtle}>{t('generatingVideo')}</p>}

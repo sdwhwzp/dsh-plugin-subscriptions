@@ -26,7 +26,7 @@ import {
   streamAntigravity,
   toAntigravityRequest,
 } from '../src/translate/antigravity.js'
-import type { TranslatableMessage } from '../src/translate/resolved.js'
+import type { TranslatableMessage, TranslatableBlock } from '../src/translate/resolved.js'
 
 const oauth = { clientId: 'test-client.apps.example.invalid', clientSecret: 'test-secret' }
 const runtime = { baseURL: 'https://antigravity.example.invalid', onboard: false }
@@ -56,7 +56,7 @@ function routed(routes: Record<string, unknown | Response>, calls: RecordedCall[
   }
 }
 
-function message(role: Message['role'], content: ContentBlock[], source?: Message['source']): Message {
+function message(role: TranslatableMessage['role'], content: TranslatableBlock[], source?: Message['source']): TranslatableMessage & { id: Message['id'] } {
   return {
     id: MessageId(`m-${Math.random().toString(36).slice(2)}`),
     role,
@@ -262,7 +262,7 @@ test('streamGenerateContent SSE and generateContent URL/forwarding are both supp
   assert.deepEqual(streamed.map(chunk => chunk.type), ['block-start', 'text-delta', 'block-end', 'finish'])
 
   const calls: RecordedCall[] = []
-  const payload = toAntigravityRequest(options([message('user', [{ type: 'text', text: 'hi' }])]), [
+  const payload = toAntigravityRequest(options([]), [
     message('user', [{ type: 'text', text: 'hi' }]),
   ], session.projectId)
   await requestAntigravityContent(session, payload, false, runtime, routed({
@@ -572,12 +572,12 @@ test('Antigravity replays signed text and reasoning only for the same provider a
     ] },
   }
   const messages = [message('assistant', [{ type: 'reasoning', text: 'thought' }, { type: 'text', text: 'answer' }], source)]
-  const payload = toAntigravityRequest(options(messages), messages, session.projectId)
+  const payload = toAntigravityRequest(options([]), messages, session.projectId)
   assert.deepEqual(payload.request.contents[0].parts, [
     { thought: true, text: 'thought', thoughtSignature: 'reasoning-signature' },
     { text: 'answer', thoughtSignature: 'text-signature' },
   ])
-  const changed = toAntigravityRequest({ ...options(messages), model: 'claude-sonnet-4-6' }, messages, session.projectId)
+  const changed = toAntigravityRequest({ ...options([]), model: 'claude-sonnet-4-6' }, messages, session.projectId)
   assert.deepEqual(changed.request.contents[0].parts, [{ text: 'answer' }])
 })
 

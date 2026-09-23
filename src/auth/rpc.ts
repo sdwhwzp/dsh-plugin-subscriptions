@@ -587,7 +587,8 @@ export function registerAuthRpc(
         SUBSCRIPTIONS_AUTH_CHANNEL,
         endpoint => endpoint.startsWith(SUBSCRIPTIONS_AUTH_PREFIX)
           && endpoint.length > SUBSCRIPTIONS_AUTH_PREFIX.length,
-        async (endpoint, payload, signal, principal) => {
+        async (endpoint, payload, signal, peer) => {
+          const principal = peer === undefined ? undefined : connection.principalOfPeer(peer)
           try {
             return await dispatch(
               controller,

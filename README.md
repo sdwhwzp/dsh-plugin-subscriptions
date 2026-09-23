@@ -1,5 +1,7 @@
 # dsh-plugin-subscriptions [![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
 
+The Harness 0.1.7 integration resolves authenticated RPC peers to account principals and translates V4 tool-role messages before assembling provider requests. Tool call ids, error flags, attachment resolution, and provider replay metadata remain intact.
+
 English | [中文](README.zh.md)
 
 Use your **ChatGPT (Codex)**, **Claude**, **Grok (X Premium)**, **GitHub Copilot**, and **Google Antigravity** subscriptions as LLM providers in [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) — no API keys. Codex, Grok, and Antigravity log in via OAuth in the dsh web UI (Settings → Subscriptions), while Copilot uses the GitHub OAuth device flow; Claude imports credentials from an existing Claude Code session when there is one (macOS Keychain or `~/.claude/.credentials.json`) and otherwise falls back to the same browser OAuth flow, so the Claude Code CLI is not required. Tokens live at `~/.dsh/plugins/subscriptions/auth.json` (mode 0600) and refresh automatically.
@@ -79,6 +81,10 @@ Codex edits use `/backend-api/codex/images/edits`; Grok edits use `/v1/images/ed
 Image generation and editing share same-provider account scheduling: try the default account first, then prefer the successful account in that session. Explicit quota, authentication, or image-entitlement rejection tries the remaining accounts; a 401 gets at most one credential refresh and retry first. Image-only cooldowns honor provider reset times and clear on login/logout. Transport failures, timeouts, 5xx responses, and invalid requests do not automatically resend, avoiding duplicate images. Set `pool.enabled: false` or `pool.autoAccounts: false` (legacy `autoFamilies` is accepted) to use only the default account. Image scheduling does not use chat catalogs, chat quota scoring, `families`, or `tiers`.
 
 ## Install
+
+### DSH compatibility
+
+The current release supports the published DSH `0.1.1-rc.2`, `0.1.2-alpha`/`rc`, `0.1.3-alpha`, and `0.1.5-alpha`/`rc` lines, including `0.1.5-rc.2`. The `0.1.5-alpha.1` peer-range anchor intentionally covers the later `0.1.5-alpha`, `0.1.5-rc`, and stable `0.1.5` builds under npm semver rules. DSH `0.1.6-alpha` is not included until it has been separately verified.
 
 ### Managing accounts and pool models
 

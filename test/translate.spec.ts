@@ -25,17 +25,18 @@ import {
   toAnthropicTools,
 } from '../src/translate/anthropic.js'
 import type { AnthropicMessage, AnthropicStreamEvent } from '../src/translate/anthropic.js'
-import { resolveImages, type TranslatableMessage } from '../src/translate/resolved.js'
+import { resolveImages, type TranslatableMessage, type TranslatableBlock } from '../src/translate/resolved.js'
 import { toChatMessages } from '../src/translate/chat-completions.js'
+import { toAntigravityRequest } from '../src/translate/antigravity.js'
 
 let messageCounter = 0
 
 /** Build a bare message without touching the frozen constructors. */
 function message(
-  role: Message['role'],
-  content: ContentBlock[],
+  role: TranslatableMessage['role'],
+  content: TranslatableBlock[],
   source?: MessageSource,
-): Message {
+): TranslatableMessage & { id: Message['id'] } {
   const resolvedSource = source ?? (role === 'assistant'
     ? { kind: 'model' as const, provider: 'codex', model: 'gpt-5.1-codex' }
     : { kind: 'user' as const })
@@ -46,7 +47,7 @@ function toolCall(id: string, name: string, args: string): ContentBlock {
   return { type: 'tool-call', id: ToolCallId(id), name, arguments: args }
 }
 
-function toolResult(callId: string, text: string, isError?: boolean): ContentBlock {
+function toolResult(callId: string, text: string, isError?: boolean): TranslatableBlock {
   return {
     type: 'tool-result',
     toolCallId: ToolCallId(callId),
@@ -711,4 +712,29 @@ test('Anthropic translator: error event mapping', () => {
     () => auth.push({ type: 'error', error: { type: 'authentication_error', message: 'bad token' } }),
     (error: unknown) => error instanceof LlmError && error.code === 'AUTH',
   )
+})
+
+
+test('V4 tool-role messages retain outputs and errors in every provider wire', async () => {
+  const history: Message[] = [
+    { id: MessageId('v4-a'), role: 'assistant', source: { kind: 'model', provider: 'codex', model: 'gpt-5.1-codex' },
+      content: [toolCall('call_v4', 'bash', '{}')] },
+    { id: MessageId('v4-t'), role: 'tool', source: { kind: 'tool', callId: ToolCallId('call_v4') },
+      toolCallId: ToolCallId('call_v4'), isError: true, content: [{ type: 'text', text: 'access denied' }] },
+  ]
+  const before = structuredClone(history)
+  const actual = await resolveImages(history, undefined)
+  const legacy = await resolveImages([
+    message('assistant', [toolCall('call_v4', 'bash', '{}')]),
+    message('user', [toolResult('call_v4', 'access denied', true)]),
+  ], undefined)
+  const options = { provider: 'antigravity', model: 'gemini-3-flash', messages: history }
+  assert.deepEqual(toAnthropicMessages(actual), toAnthropicMessages(legacy))
+  assert.deepEqual(toChatMessages(actual), toChatMessages(legacy))
+  assert.deepEqual(toResponsesInput(actual), toResponsesInput(legacy))
+  assert.deepEqual(toAntigravityRequest(options, actual, 'project').request.contents, toAntigravityRequest(options, legacy, 'project').request.contents)
+  assert.deepEqual(history, before)
+  await assert.rejects(() => resolveImages([{
+    id: MessageId('v4-d'), role: 'developer', source: { kind: 'user' }, content: [],
+  }], undefined), (error: unknown) => error instanceof LlmError && error.code === 'UNSUPPORTED_CONTENT')
 })

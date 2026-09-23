@@ -1,5 +1,7 @@
 # dsh-plugin-subscriptions [![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
 
+Harness 0.1.7 适配先从已认证 RPC 对端解析账号身份，再将 V4 工具结果消息转换为提供方请求；保留工具调用 ID、错误标志、附件解析和提供方回放元数据。
+
 [English](README.md) | 中文
 
 把你的 **ChatGPT(Codex)**、**Claude**、**Grok(X Premium)**、**GitHub Copilot** 和 **Google Antigravity** 订阅当作 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的 LLM provider 使用 —— 不需要 API key。Codex、Grok 和 Antigravity 通过 dsh web 界面 OAuth 登录(设置 → 订阅);Copilot 使用 GitHub OAuth 设备码流程;Claude 在存在 Claude Code 会话时直接导入凭据(macOS Keychain 或 `~/.claude/.credentials.json`),否则回退到同样的浏览器 OAuth 流程,因此不要求安装 Claude Code CLI。Token 保存在 `~/.dsh/plugins/subscriptions/auth.json`(权限 0600),过期自动刷新。
@@ -78,6 +80,10 @@ Codex 编辑走 `/backend-api/codex/images/edits`，Grok 编辑走 `/v1/images/e
 图片生成与编辑共用同 provider 的账号调度：首次优先默认账号，成功后在当前会话优先复用；收到明确的额度、认证或图片能力拒绝时尝试其余账号。401 最多刷新后重试一次。冷却状态仅用于图片请求，并读取服务商返回的重置时间；登录/退出会清理相关状态。网络中断、超时、5xx 和参数错误不会自动重发，避免重复出图。`pool.enabled: false` 或 `pool.autoAccounts: false`（兼容 `autoFamilies`）关闭图片自动账号池，恢复默认账号直连。图片调度不使用对话模型目录、对话用量评分、`families` 或 `tiers`。
 
 ## 安装
+
+### DSH 兼容性
+
+当前版本支持已发布的 DSH `0.1.1-rc.2`、`0.1.2-alpha`/`rc`、`0.1.3-alpha` 和 `0.1.5-alpha`/`rc` 版本线，包括 `0.1.5-rc.2`。peer 范围使用 `0.1.5-alpha.1` 作为锚点，按照 npm semver 规则也覆盖之后的 `0.1.5-alpha`、`0.1.5-rc` 和稳定版 `0.1.5`。DSH `0.1.6-alpha` 尚未单独验证，因此暂不纳入支持范围。
 
 ### 管理账号与 Pool 模型
 

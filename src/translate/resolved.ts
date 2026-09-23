@@ -7,7 +7,7 @@
  */
 
 import { LlmError } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock, Message, ToolResultBlock } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, Message, RequestMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 
 /** An image block with its bytes resolved to inline base64 for the wire. */
@@ -20,10 +20,13 @@ export interface ResolvedImagePart {
 }
 
 /** Translator input block: a harness block, with images pre-resolved. */
-export type TranslatableBlock = Exclude<ContentBlock, ToolResultBlock> | ResolvedImagePart | ResolvedToolResultBlock
+export type TranslatableBlock = ContentBlock | ResolvedImagePart | ResolvedToolResultBlock
 
 /** Tool results may themselves carry attachment-backed images. */
-export interface ResolvedToolResultBlock extends Omit<ToolResultBlock, 'content'> {
+export interface ResolvedToolResultBlock {
+  type: 'tool-result'
+  toolCallId: ToolCallId
+  isError?: boolean
   content: readonly TranslatableBlock[]
 }
 
@@ -65,7 +68,8 @@ export interface TranslatableMessage {
 
 /**
  * Resolve every ImageBlock's attachment reference to inline base64 bytes.
- * Messages without images pass through unchanged. A request carrying an image
+ * V4 tool-role messages become translator tool-result blocks; ordinary messages
+ * without images pass through unchanged. A request carrying an image
  * with no attachment service available fails loudly rather than silently
  * dropping the image.
  * @param messages - the request's conversation messages.
@@ -74,14 +78,22 @@ export interface TranslatableMessage {
  * @returns the same messages with image blocks resolved for the translators.
  */
 export async function resolveImages(
-  messages: readonly Message[],
+  messages: readonly (RequestMessage | TranslatableMessage)[],
   attachments: AttachmentStore | undefined,
   signal?: AbortSignal,
 ): Promise<readonly TranslatableMessage[]> {
-  const hasImage = (block: ContentBlock): boolean => block.type === 'image'
+  // V4 logs tool results as messages; translators share one resolved wire input.
+  const normalized: readonly TranslatableMessage[] = messages.some(message => message.role === 'tool' || message.role === 'developer')
+    ? messages.map(message => {
+      if (message.role === 'developer') throw new LlmError('Developer messages are not supported yet', 'UNSUPPORTED_CONTENT')
+      if (message.role !== 'tool') return message
+      return { role: 'user', content: [{ type: 'tool-result', toolCallId: message.toolCallId,
+        ...(message.isError === undefined ? {} : { isError: message.isError }), content: message.content }] }
+    }) : messages as readonly TranslatableMessage[]
+  const hasImage = (block: TranslatableBlock): boolean => block.type === 'image'
     || (block.type === 'tool-result' && block.content.some(hasImage))
-  if (!messages.some(message => message.content.some(hasImage))) {
-    return messages
+  if (!normalized.some(message => message.content.some(hasImage))) {
+    return normalized
   }
   if (attachments === undefined) {
     throw new LlmError(
@@ -90,11 +102,11 @@ export async function resolveImages(
       'UNSUPPORTED',
     )
   }
-  const resolveBlock = async (block: ContentBlock): Promise<TranslatableBlock[]> => {
+  const resolveBlock = async (block: TranslatableBlock): Promise<TranslatableBlock[]> => {
     if (block.type === 'tool-result') {
       return [{ ...block, content: (await Promise.all(block.content.map(resolveBlock))).flat() }]
     }
-    if (block.type !== 'image') return [block]
+    if (block.type !== 'image' || 'dataBase64' in block) return [block]
     const stored = await attachments.readImage(block.attachment, signal)
     const { attachmentId, mediaType, bytes, width, height, name } = stored.ref
     return [{
@@ -108,9 +120,9 @@ export async function resolveImages(
       })}`,
     }]
   }
-  return Promise.all(messages.map(async (message): Promise<TranslatableMessage> => ({
+  return Promise.all(normalized.map(async (message): Promise<TranslatableMessage> => ({
     role: message.role,
-    source: message.source,
+    ...(message.source === undefined ? {} : { source: message.source }),
     content: (await Promise.all(message.content.map(resolveBlock))).flat(),
   })))
 }

@@ -18,16 +18,16 @@ import {
   toChatTools,
 } from '../src/translate/chat-completions.js'
 import type { ChatCompletionsStreamEvent } from '../src/translate/chat-completions.js'
-import type { TranslatableMessage } from '../src/translate/resolved.js'
+import type { TranslatableMessage, TranslatableBlock } from '../src/translate/resolved.js'
 
 let messageCounter = 0
 
 /** Build a bare message without touching the frozen constructors. */
 function message(
-  role: Message['role'],
-  content: ContentBlock[],
+  role: TranslatableMessage['role'],
+  content: TranslatableBlock[],
   source?: MessageSource,
-): Message {
+): TranslatableMessage & { id: Message['id'] } {
   const resolvedSource = source ?? (role === 'assistant'
     ? { kind: 'model' as const, provider: 'copilot', model: 'gpt-4.1' }
     : { kind: 'user' as const })
@@ -38,7 +38,7 @@ function toolCall(id: string, name: string, args: string): ContentBlock {
   return { type: 'tool-call', id: ToolCallId(id), name, arguments: args }
 }
 
-function toolResult(callId: string, text: string): ContentBlock {
+function toolResult(callId: string, text: string): TranslatableBlock {
   return {
     type: 'tool-result',
     toolCallId: ToolCallId(callId),
