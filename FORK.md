@@ -104,3 +104,7 @@ subaccount refusals stay covered alongside upstream provider and usage cases.
 ## Codex workspace identities
 
 Codex accounts use the upstream workspace-and-user key and preserve aliases for existing credentials and pool members. Separate users in one workspace remain separate accounts; token refresh follows the canonical identity. Gateway account authorization and the fast-tier restriction still apply.
+
+## Current Harness tool messages
+
+The upstream translators accept first-class tool and developer messages directly. Image resolution preserves their correlation fields and error flags. Both legacy tool-result blocks and current tool messages use `anthropicToolId` for Claude result correlation; gateway authorization and `fastTier: false` remain enforced.

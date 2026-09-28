@@ -8,6 +8,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { LlmError, MessageId } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '../src/compat.js'
+import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { ContentBlock, Message, MessageSource, StreamChunk } from '@deepseek-ai/dsh-llm'
 import {
   ResponsesStreamTranslator,
@@ -78,6 +79,85 @@ test('toResponsesInput: text, tool call, and tool result round trip', () => {
     { type: 'function_call', call_id: 'call-1', name: 'bash', arguments: '{"cmd":"ls"}' },
     { type: 'function_call_output', call_id: 'call-1', output: 'file-a\nfile-b' },
   ])
+})
+
+test('toResponsesInput: first-class tool-role messages become function outputs', () => {
+  const result: TranslatableMessage = {
+    role: 'tool',
+    toolCallId: 'call-current',
+    content: [{ type: 'text', text: 'current result' }],
+  }
+  const messages: TranslatableMessage[] = [
+    message('assistant', [toolCall('call-current', 'bash', '{}')]),
+    result,
+  ]
+  const { input } = toResponsesInput(messages)
+  assert.deepEqual(input, [
+    { type: 'function_call', call_id: 'call-current', name: 'bash', arguments: '{}' },
+    { type: 'function_call_output', call_id: 'call-current', output: 'current result' },
+  ])
+  assert.deepEqual(toChatMessages(messages)[1], {
+    role: 'tool', tool_call_id: 'call-current', content: 'current result',
+  })
+  assert.deepEqual(toAnthropicMessages(messages)[1], {
+    role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call-current', content: 'current result' }],
+  })
+})
+
+test('first-class parallel tool results preserve Claude error flags and call order', () => {
+  const messages: TranslatableMessage[] = [
+    message('assistant', [toolCall('first', 'bash', '{}'), toolCall('second', 'bash', '{}')]),
+    { role: 'tool', toolCallId: 'first', isError: true, content: [{ type: 'text', text: 'failed' }] },
+    { role: 'tool', toolCallId: 'second', isError: false, content: [{ type: 'text', text: 'done' }] },
+  ]
+  assert.deepEqual(toAnthropicMessages(messages)[1], {
+    role: 'user',
+    content: [
+      { type: 'tool_result', tool_use_id: 'first', content: 'failed', is_error: true },
+      { type: 'tool_result', tool_use_id: 'second', content: 'done' },
+    ],
+  })
+  assert.deepEqual(toChatMessages(messages).slice(1), [
+    { role: 'tool', tool_call_id: 'first', content: 'failed' },
+    { role: 'tool', tool_call_id: 'second', content: 'done' },
+  ])
+})
+
+test('developer messages from DSH 0.1.7 are not attributed to the assistant', () => {
+  const messages: TranslatableMessage[] = [
+    { role: 'developer', content: [{ type: 'text', text: 'Tool inventory changed.' }] },
+  ]
+  assert.equal(toResponsesInput(messages).input[0].role, 'developer')
+  assert.deepEqual(toChatMessages(messages), [{ role: 'developer', content: 'Tool inventory changed.' }])
+  assert.deepEqual(toAnthropicMessages(messages), [{ role: 'user', content: [{ type: 'text', text: 'Tool inventory changed.' }] }])
+})
+
+test('toResponsesInput: first-class tool images follow the function output', () => {
+  const input = toResponsesInput([{
+    role: 'tool',
+    toolCallId: 'call-image',
+    content: [
+      { type: 'text', text: 'caption' },
+      { type: 'image', mediaType: 'image/png', dataBase64: 'aGk=' },
+    ],
+  }]).input
+  assert.deepEqual(input.map(item => item.type), ['function_call_output', 'message'])
+  assert.equal(input[0].output, 'caption')
+  assert.equal((input[1].content as Record<string, unknown>[])[1].type, 'input_image')
+})
+
+test('resolveImages preserves first-class tool call ids', async () => {
+  const ref = { attachmentId: AttachmentId('image-1'), mediaType: 'image/png' as const, bytes: 2, width: 1, height: 1 }
+  const result: TranslatableMessage = {
+    role: 'tool',
+    toolCallId: 'call-image',
+    content: [{ type: 'image', attachment: ref }],
+  }
+  const resolved = await resolveImages([result], {
+    readImage: async () => ({ ref, data: new Uint8Array([104, 105]) }),
+  } as never)
+  assert.equal(resolved[0].toolCallId, 'call-image')
+  assert.equal(toResponsesInput(resolved).input[0].call_id, 'call-image')
 })
 
 test('toResponsesInput: system-role messages become instructions unless options.system wins', () => {
@@ -718,15 +798,15 @@ test('Anthropic translator: error event mapping', () => {
 test('V4 tool-role messages retain outputs and errors in every provider wire', async () => {
   const history: Message[] = [
     { id: MessageId('v4-a'), role: 'assistant', source: { kind: 'model', provider: 'codex', model: 'gpt-5.1-codex' },
-      content: [toolCall('call_v4', 'bash', '{}')] },
-    { id: MessageId('v4-t'), role: 'tool', source: { kind: 'tool', callId: ToolCallId('call_v4') },
-      toolCallId: ToolCallId('call_v4'), isError: true, content: [{ type: 'text', text: 'access denied' }] },
+      content: [toolCall('call_v4|fc_01', 'bash', '{}')] },
+    { id: MessageId('v4-t'), role: 'tool', source: { kind: 'tool', callId: ToolCallId('call_v4|fc_01') },
+      toolCallId: ToolCallId('call_v4|fc_01'), isError: true, content: [{ type: 'text', text: 'access denied' }] },
   ]
   const before = structuredClone(history)
   const actual = await resolveImages(history, undefined)
   const legacy = await resolveImages([
-    message('assistant', [toolCall('call_v4', 'bash', '{}')]),
-    message('user', [toolResult('call_v4', 'access denied', true)]),
+    message('assistant', [toolCall('call_v4|fc_01', 'bash', '{}')]),
+    message('user', [toolResult('call_v4|fc_01', 'access denied', true)]),
   ], undefined)
   const options = { provider: 'antigravity', model: 'gemini-3-flash', messages: history }
   assert.deepEqual(toAnthropicMessages(actual), toAnthropicMessages(legacy))
@@ -734,7 +814,6 @@ test('V4 tool-role messages retain outputs and errors in every provider wire', a
   assert.deepEqual(toResponsesInput(actual), toResponsesInput(legacy))
   assert.deepEqual(toAntigravityRequest(options, actual, 'project').request.contents, toAntigravityRequest(options, legacy, 'project').request.contents)
   assert.deepEqual(history, before)
-  await assert.rejects(() => resolveImages([{
-    id: MessageId('v4-d'), role: 'developer', source: { kind: 'user' }, content: [],
-  }], undefined), (error: unknown) => error instanceof LlmError && error.code === 'UNSUPPORTED_CONTENT')
+  const developer: TranslatableMessage = { role: 'developer', content: [{ type: 'text', text: 'inventory' }] }
+  assert.deepEqual(await resolveImages([developer], undefined), [developer])
 })

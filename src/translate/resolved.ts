@@ -46,6 +46,12 @@ export function withToolResultImages(messages: readonly TranslatableMessage[]): 
   for (const message of messages) {
     if (message.role === 'assistant') flush()
     out.push(message)
+    if (message.role === 'tool') {
+      const parts = message.content.filter((part): part is ResolvedImagePart => part.type === 'image' && 'dataBase64' in part)
+      if (parts.length > 0) {
+        images.push({ type: 'text', text: `Images from tool result ${String(message.toolCallId)}:` }, ...parts)
+      }
+    }
     for (const block of message.content) {
       if (block.type !== 'tool-result') continue
       const parts = block.content.filter((part): part is ResolvedImagePart => part.type === 'image' && 'dataBase64' in part)
@@ -60,15 +66,20 @@ export function withToolResultImages(messages: readonly TranslatableMessage[]): 
 
 /** Translator input message: role plus resolved blocks. */
 export interface TranslatableMessage {
-  role: 'system' | 'user' | 'assistant'
+  role: 'system' | 'developer' | 'user' | 'assistant' | 'tool'
   content: readonly TranslatableBlock[]
+  /** First-class tool result correlation in current harness messages. */
+  toolCallId?: string
+  /** Chat Completions correlation in imported histories. */
+  tool_call_id?: string
+  isError?: boolean
   /** Preserved for adapters whose provider-private replay metadata is required. */
   source?: Message['source']
 }
 
 /**
  * Resolve every ImageBlock's attachment reference to inline base64 bytes.
- * V4 tool-role messages become translator tool-result blocks; ordinary messages
+ * Message roles and tool result metadata survive image resolution; messages
  * without images pass through unchanged. A request carrying an image
  * with no attachment service available fails loudly rather than silently
  * dropping the image.
@@ -82,18 +93,10 @@ export async function resolveImages(
   attachments: AttachmentStore | undefined,
   signal?: AbortSignal,
 ): Promise<readonly TranslatableMessage[]> {
-  // V4 logs tool results as messages; translators share one resolved wire input.
-  const normalized: readonly TranslatableMessage[] = messages.some(message => message.role === 'tool' || message.role === 'developer')
-    ? messages.map(message => {
-      if (message.role === 'developer') throw new LlmError('Developer messages are not supported yet', 'UNSUPPORTED_CONTENT')
-      if (message.role !== 'tool') return message
-      return { role: 'user', content: [{ type: 'tool-result', toolCallId: message.toolCallId,
-        ...(message.isError === undefined ? {} : { isError: message.isError }), content: message.content }] }
-    }) : messages as readonly TranslatableMessage[]
   const hasImage = (block: TranslatableBlock): boolean => block.type === 'image'
     || (block.type === 'tool-result' && block.content.some(hasImage))
-  if (!normalized.some(message => message.content.some(hasImage))) {
-    return normalized
+  if (!messages.some(message => message.content.some(hasImage))) {
+    return messages
   }
   if (attachments === undefined) {
     throw new LlmError(
@@ -120,9 +123,8 @@ export async function resolveImages(
       })}`,
     }]
   }
-  return Promise.all(normalized.map(async (message): Promise<TranslatableMessage> => ({
-    role: message.role,
-    ...(message.source === undefined ? {} : { source: message.source }),
+  return Promise.all(messages.map(async (message): Promise<TranslatableMessage> => ({
+    ...message,
     content: (await Promise.all(message.content.map(resolveBlock))).flat(),
   })))
 }

@@ -17,6 +17,7 @@ import type { CSSProperties } from 'react'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import { en } from './locales.js'
 import { ProviderAccountManager } from './ProviderAccountManager.js'
+import { UsageBadgeDisplaySetting } from './UsageBadgeDisplaySetting.js'
 import type { SubscriptionsKey } from './locales.js'
 
 import { callSubscriptionsAuth, SubscriptionsAuthError } from './subscriptions-rpc.js'
@@ -773,6 +774,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   return (
     <div style={styles.section}>
       <p style={styles.intro}>{t('intro')}</p>
+      <UsageBadgeDisplaySetting t={t} />
       {canManageCredentials && <div style={styles.proxyCard}>
         <div style={styles.cardHeader}>
           <span style={{

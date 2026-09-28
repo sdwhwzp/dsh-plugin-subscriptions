@@ -32,7 +32,9 @@ Codex models whose catalog advertises the fast tier (the codex CLI's fast mode) 
 
 ![Speed toggle with the Standard/Fast menu open](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/speed-toggle.png)
 
-The composer's stats row gains a **subscription usage** pill showing the remaining rate-limit window for the provider of the session's current model (Codex when a GPT model is selected, Grok for a Grok model, and so on). Click it to expand every logged-in provider and account — the default account is starred, and the current provider is listed first:
+The composer's stats row gains a **subscription usage** pill showing the used percentage and reset window for the provider of the session's current model (Codex for a Codex model, Grok for a Grok model, and so on). It shows at most one provider: when switching to a non-subscription model, it keeps the most recent subscription selected in the mounted conversation view, or stays hidden if there is none. This recent-model history is not persisted across page reloads. Click the pill to expand every logged-in provider and account — the default account is starred, and the current provider is listed first. Antigravity previews only the current model's windows (at most two per account); the other model windows remain available in a closed disclosure.
+
+**Settings → Subscriptions → Status-bar quota display** selects **Current / most recent subscription only** (default) or **Hidden**. The display preference is saved in the current browser, applies immediately, survives reloads, and synchronizes between tabs of the same origin. It does not hide usage details in Settings, change model selection, or change account routing.
 
 ![Subscription usage pill expanded to show every provider and account](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/usage-badge.png)
 
@@ -84,7 +86,7 @@ Image generation and editing share same-provider account scheduling: try the def
 
 ### DSH compatibility
 
-The current release supports the published DSH `0.1.1-rc.2`, `0.1.2-alpha`/`rc`, `0.1.3-alpha`, and `0.1.5-alpha`/`rc` lines, including `0.1.5-rc.2`. The `0.1.5-alpha.1` peer-range anchor intentionally covers the later `0.1.5-alpha`, `0.1.5-rc`, and stable `0.1.5` builds under npm semver rules. DSH `0.1.6-alpha` is not included until it has been separately verified.
+The current release supports the published DSH `0.1.1-rc.2`, `0.1.2-alpha`/`rc`, `0.1.3-alpha`, `0.1.5-alpha`/`rc`, and `0.1.7-rc` lines, including `0.1.5-rc.2` and `0.1.7-rc.2`. The `0.1.5-alpha.1` peer-range anchor intentionally covers the later `0.1.5-alpha`, `0.1.5-rc`, and stable `0.1.5` builds under npm semver rules; the `0.1.7-rc.1` anchor likewise covers the later `0.1.7-rc` and stable `0.1.7` builds. DSH `0.1.6-alpha` and `0.1.7-alpha` are not included until they have been separately verified.
 
 ### Managing accounts and pool models
 
@@ -289,6 +291,8 @@ pnpm install   # devDependencies link to an adjacent deepseek-harness checkout
 pnpm build     # tsc -b (lib/types/) + tsdown (lib/index.js and lib/client.js)
 pnpm test      # node --test over compiled unit specs
 ```
+
+For the optional offline quota UI check, point `PLAYWRIGHT_PATH` at an installed Playwright package and run `node test/subscription-usage-browser.mjs`. It uses synthetic accounts and intercepted browser routes, without a DSH server or credentials.
 
 `prepare` bundles the Host and Client runtime entries without running the TypeScript projects. Development and declaration generation require the adjacent Harness checkout. For a deployment without that checkout, install a prebuilt package or release tarball containing `lib/`.
 

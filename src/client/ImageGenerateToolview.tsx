@@ -162,7 +162,7 @@ export function ImageGenerateToolview(props: ImageGenerateToolviewProps) {
   const t = props.t ?? fallbackTranslate
   if (block === undefined) return null
   const settled = 'kind' in block
-  const argsRaw = (settled ? block.call?.argsRaw : block.argsRaw) ?? ''
+  const argsRaw = (settled ? block.call?.argsRaw : block.phase === 'start' ? block.argsRaw : undefined) ?? ''
   let references = 0
   try {
     const args = JSON.parse(argsRaw)
