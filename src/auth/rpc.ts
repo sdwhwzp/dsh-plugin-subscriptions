@@ -13,6 +13,7 @@ import type { RpcResult } from '../compat.js'
 import type { AuthenticatedPrincipal } from '@deepseek-ai/dsh-llm'
 import type { HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
 import type { ProxyConfigView, ProxyDraft, ProxyInput, ProxyTestResult } from '../http.js'
+import type { CliVersion } from '../providers/npm-cli-version.js'
 
 /** API Gateway namespace generated for the browser client. */
 export const SUBSCRIPTIONS_AUTH_NAMESPACE = 'subscriptionsAuth'
@@ -87,6 +88,8 @@ export interface ProviderStatus {
   accounts: AccountStatus[]
   /** The last login error, shown until the next success. */
   detail?: string
+  /** The CLI version this route presents (Codex, Claude), and where it came from. */
+  clientVersion?: CliVersion
 }
 
 /** How a Claude login should acquire credentials (other providers ignore it). */

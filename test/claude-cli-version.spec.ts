@@ -14,6 +14,7 @@ import {
 import { AccountTokenManager } from '../src/providers/accounts.js'
 import type { ClaudeSession } from '../src/auth/store.js'
 import type { FetchFn } from '../src/providers/common.js'
+import { presentedVersion } from '../src/index.js'
 
 const OLD_LOCAL = '2.1.1'
 const NEWER = '9.0.0'
@@ -35,8 +36,8 @@ function tokens(): AccountTokenManager<ClaudeSession> {
 
 test('Claude Code version floor is the newer of the local CLI and the bundled fallback', () => {
   // An outdated local install must not pin requests below what new models need.
-  assert.equal(claudeCliVersionFloor(() => OLD_LOCAL), CLAUDE_CLI_FALLBACK_VERSION)
-  assert.equal(claudeCliVersionFloor(() => NEWER), NEWER)
+  assert.deepEqual(claudeCliVersionFloor(() => OLD_LOCAL), { version: CLAUDE_CLI_FALLBACK_VERSION, source: 'fallback' })
+  assert.deepEqual(claudeCliVersionFloor(() => NEWER), { version: NEWER, source: 'local' })
 })
 
 test('Claude Code version lookup reads npm latest without credentials and never goes below the floor', async () => {
@@ -49,16 +50,20 @@ test('Claude Code version lookup reads npm latest without credentials and never 
     return Response.json({ version: '2.1.999' })
   }, undefined, undefined, detect)
   assert.equal(probes, 0, 'the local CLI is probed lazily, not at construction')
+  assert.equal(cache.current(), undefined)
   assert.deepEqual(await Promise.all([cache.resolve(), cache.resolve()]), ['2.1.999', '2.1.999'])
   assert.equal(probes, 1)
+  assert.deepEqual(cache.current(), { version: '2.1.999', source: 'npm' })
 
   // npm behind the floor (a newer local CLI) keeps the floor.
   const local = new ClaudeCliVersionCache(async () => Response.json({ version: '2.1.999' }), undefined, undefined, () => NEWER)
   assert.equal(await local.resolve(), NEWER)
+  assert.deepEqual(local.current(), { version: NEWER, source: 'local' })
 
   // An unreachable registry serves the floor.
   const offline = new ClaudeCliVersionCache(async () => new Response('', { status: 503 }), undefined, undefined, detect)
   assert.equal(await offline.resolve(), CLAUDE_CLI_FALLBACK_VERSION)
+  assert.deepEqual(offline.current(), { version: CLAUDE_CLI_FALLBACK_VERSION, source: 'fallback' })
 })
 
 test('Claude catalog and usage requests present the resolved Claude Code version', async () => {
@@ -99,4 +104,35 @@ test('Claude turns present the resolved Claude Code version', async () => {
   } finally {
     globalThis.fetch = original
   }
+})
+
+test('Settings waits out the first version lookup, but not a stalled refresh', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let calls = 0
+  const cache = new ClaudeCliVersionCache(() => {
+    calls++
+    return calls === 1
+      ? new Promise(resolve => setTimeout(() => resolve(Response.json({ version: '2.1.999' })), 50))
+      : new Promise(() => {})
+  }, undefined, 200, () => OLD_LOCAL)
+  const cold = presentedVersion(cache, 5)()
+  t.mock.timers.tick(5)
+  assert.equal(cache.current(), undefined)
+  t.mock.timers.tick(45)
+  assert.deepEqual(await cold, { version: '2.1.999', source: 'npm' })
+
+  cache.invalidate()
+  const warm = presentedVersion(cache, 20)()
+  let refreshFinished = false
+  const refresh = cache.resolve().then(() => { refreshFinished = true })
+  t.mock.timers.tick(20)
+  assert.deepEqual(await warm, { version: '2.1.999', source: 'npm' })
+  assert.equal(refreshFinished, false)
+  t.mock.timers.tick(180)
+  await refresh
+
+  const offline = new ClaudeCliVersionCache(() => new Promise(() => {}), undefined, 30, () => OLD_LOCAL)
+  const fallback = presentedVersion(offline, 5)()
+  t.mock.timers.tick(30)
+  assert.deepEqual(await fallback, { version: CLAUDE_CLI_FALLBACK_VERSION, source: 'fallback' })
 })
