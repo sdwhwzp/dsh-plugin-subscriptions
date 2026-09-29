@@ -313,3 +313,6 @@ After `pnpm build`, restart `dsh web` to pick up changes.
 ### Authenticated browser RPC
 
 Settings, usage, speed selection, and generated-media loaders call `/api/subscriptions-auth/<endpoint>` through the shared authenticated connection. The request method includes the `subscriptions-auth/` prefix, matching the Host interceptor. Global provider settings require administrator authority; ordinary accounts retain their assigned model access.
+## Harness 0.2 deployment
+
+This fork accepts Harness `0.2.0-rc.1` in addition to its existing runtime peer ranges. Deploy all Harness peers from one runtime release; account authorization, settings persistence, and browser/desktop behavior remain owned by the existing integrations.

@@ -304,3 +304,6 @@ pnpm test      # 编译后跑 node --test 单测
 - `src/translate/` —— dsh `Message[]` 与 OpenAI Responses / Anthropic Messages 格式互转,SSE → `StreamChunk`
 - `src/tools/` —— `x_search`、`image_generate` 与 `video_generate`
 - `src/client/` —— 设置 → 订阅页面(浏览器面,中英文,跟随明暗主题)
+## Harness 0.2 部署
+
+本 fork 在原有运行时范围之外支持 Harness `0.2.0-rc.1`。部署时所有 Harness 依赖必须来自同一版本；账号授权、配置持久化和网页／桌面功能继续使用现有集成。
