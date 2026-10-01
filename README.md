@@ -86,6 +86,8 @@ Image generation and editing share same-provider account scheduling: try the def
 
 ### DSH compatibility
 
+Version `0.9.7` adds support for DSH `0.2.0-rc.2`, with development dependencies pinned to that runtime. It handles request-only messages, first-class tool results, preparing tool views, and offloaded image placeholders while retaining legacy history translation. Other `0.2` prereleases are not implicitly allowed.
+
 The current release supports the published DSH `0.1.1-rc.2`, `0.1.2-alpha`/`rc`, `0.1.3-alpha`, `0.1.5-alpha`/`rc`, and `0.1.7-rc` lines, including `0.1.5-rc.2` and `0.1.7-rc.2`. The `0.1.5-alpha.1` peer-range anchor intentionally covers the later `0.1.5-alpha`, `0.1.5-rc`, and stable `0.1.5` builds under npm semver rules; the `0.1.7-rc.1` anchor likewise covers the later `0.1.7-rc` and stable `0.1.7` builds. DSH `0.1.6-alpha` and `0.1.7-alpha` are not included until they have been separately verified.
 
 ### Managing accounts and pool models
@@ -315,4 +317,4 @@ After `pnpm build`, restart `dsh web` to pick up changes.
 Settings, usage, speed selection, and generated-media loaders call `/api/subscriptions-auth/<endpoint>` through the shared authenticated connection. The request method includes the `subscriptions-auth/` prefix, matching the Host interceptor. Global provider settings require administrator authority; ordinary accounts retain their assigned model access.
 ## Harness 0.2 deployment
 
-This fork accepts Harness `0.2.0-rc.1` in addition to its existing runtime peer ranges. Deploy all Harness peers from one runtime release; account authorization, settings persistence, and browser/desktop behavior remain owned by the existing integrations.
+This fork accepts Harness `0.2.0-rc.2` in addition to its existing runtime peer ranges. Deploy all Harness peers from one runtime release; account authorization, settings persistence, and browser/desktop behavior remain owned by the existing integrations.

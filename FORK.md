@@ -110,3 +110,7 @@ Codex accounts use the upstream workspace-and-user key and preserve aliases for 
 The upstream translators accept first-class tool and developer messages directly. Image resolution preserves their correlation fields and error flags. Both legacy tool-result blocks and current tool messages use `anthropicToolId` for Claude result correlation; gateway authorization and `fastTier: false` remain enforced.
 
 Claude requests apply the upstream 2000-pixel image limit to user and tool-result images. Request projections preserve the stored attachment, message role, tool call ID, source, and error flag.
+
+## Prepared routing and request-only images
+
+Provider preparation binds the upstream account pool and capabilities before generation. Empty error finishes can move to another eligible account before content is emitted; SSE cancellation releases the upstream reader. Images omitted by Harness remain text and do not trigger attachment reads. The shared authenticated RPC, account refusals, fast-tier gate and direct first-class tool-message translation remain in place.

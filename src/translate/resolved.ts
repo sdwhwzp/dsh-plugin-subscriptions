@@ -6,7 +6,7 @@
  * base64 data.
  */
 
-import { LlmError } from '@deepseek-ai/dsh-llm'
+import { LlmError, offloadedImageText } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, Message, RequestMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 
@@ -74,7 +74,7 @@ export interface TranslatableMessage {
   tool_call_id?: string
   isError?: boolean
   /** Preserved for adapters whose provider-private replay metadata is required. */
-  source?: Message['source']
+  source?: NonNullable<Message['source']>
 }
 
 /** A route's cap on outgoing image size; stored attachments are never changed. */
@@ -127,7 +127,10 @@ export async function resolveImages(
   if (!messages.some(message => message.content.some(hasImage))) {
     return messages
   }
-  if (attachments === undefined) {
+  const hasRetainedImage = (block: TranslatableBlock): boolean => block.type === 'image'
+    ? !('dataBase64' in block) && !('offloaded' in block && block.offloaded === true)
+    : block.type === 'tool-result' && block.content.some(hasRetainedImage)
+  if (attachments === undefined && messages.some(message => message.content.some(hasRetainedImage))) {
     throw new LlmError(
       'dsh-plugin-subscriptions: the request carries an image but no attachments service is mounted; '
       + 'image input requires the harness attachment store',
@@ -135,6 +138,7 @@ export async function resolveImages(
     )
   }
   const readForRequest = async (ref: ImageAttachmentRef) => {
+    if (attachments === undefined) throw new LlmError('No attachment service for retained image', 'UNSUPPORTED')
     const target = limit === undefined ? undefined : imageRequestTarget(ref, limit)
     if (target !== undefined) {
       try {
@@ -153,6 +157,7 @@ export async function resolveImages(
       return [{ ...block, content: (await Promise.all(block.content.map(resolveBlock))).flat() }]
     }
     if (block.type !== 'image' || 'dataBase64' in block) return [block]
+    if (block.offloaded === true) return [{ type: 'text', text: offloadedImageText(block.attachment) }]
     const { data, mediaType: sentType, ref } = await readForRequest(block.attachment)
     const { attachmentId, mediaType, bytes, width, height, name } = ref
     return [{

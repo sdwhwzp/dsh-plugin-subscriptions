@@ -75,8 +75,10 @@ function toolResultValue(block: ResolvedToolResultBlock): Record<string, unknown
   } catch {
     return { output: text, ...block.isError === true ? { isError: true } : {} }
   }
-  if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>
-  return { output: parsed }
+  if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    return { ...parsed as Record<string, unknown>, ...block.isError === true ? { isError: true } : {} }
+  }
+  return { output: parsed, ...block.isError === true ? { isError: true } : {} }
 }
 
 /** Safely read per-block replay metadata emitted by this adapter. */
