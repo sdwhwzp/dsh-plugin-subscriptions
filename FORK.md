@@ -114,3 +114,7 @@ Claude requests apply the upstream 2000-pixel image limit to user and tool-resul
 ## Prepared routing and request-only images
 
 Provider preparation binds the upstream account pool and capabilities before generation. Empty error finishes can move to another eligible account before content is emitted; SSE cancellation releases the upstream reader. Images omitted by Harness remain text and do not trigger attachment reads. The shared authenticated RPC, account refusals, fast-tier gate and direct first-class tool-message translation remain in place.
+
+## Claude aggregate image budget
+
+The upstream request budget offloads the oldest inline images before the Claude payload exceeds its size limit. First-class tool messages keep their source, correlation id and error flag throughout image resizing and offloading. The deployment also accepts Harness `0.2.1-alpha.1`; its linked source supplies the authenticated RPC and image-offload executor.

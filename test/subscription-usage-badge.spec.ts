@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createElement } from 'react'
+import { PartialArguments } from '@deepseek-ai/dsh-util-values'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { registerHooks } from 'node:module'
 // The host primitives ship CSS modules; Node needs only their empty class map
@@ -21,7 +22,7 @@ import { en, zh } from '../src/client/locales.js'
 
 test('media tool views render the preparing phase before arguments are available', () => {
   for (const [Component, name] of [[ImageGenerateToolview, 'image_generate'], [VideoGenerateToolview, 'video_generate']] as const) {
-    const block = { phase: 'preparing' as const, callId: 'media-call', name, turn: 0, step: 0, time: 0, subCalls: [] }
+    const block = { phase: 'preparing' as const, args: new PartialArguments(), callId: 'media-call', name, turn: 0, step: 0, time: 0, subCalls: [] }
     const html = renderToStaticMarkup(createElement(Component, { block }))
     assert.ok(html.includes(name))
   }

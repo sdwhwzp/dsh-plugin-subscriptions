@@ -7,6 +7,7 @@
  */
 
 import { LlmError, offloadedImageText } from '@deepseek-ai/dsh-llm'
+import * as llm from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, Message, RequestMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 
@@ -83,6 +84,52 @@ export interface ImageRequestLimit {
   maxEdge: number
   /** Encoded-byte target before base64 expansion. */
   maxBytes: number
+}
+
+/**
+ * Failure code a host's image-offload executor answers by replacing the oldest
+ * retained images with text and retrying (`IMAGE_OFFLOAD_REQUIRED_CODE` in
+ * dsh-llm 0.2+). Spelled out so the build links against older hosts too.
+ */
+export const IMAGE_OFFLOAD_REQUIRED = 'IMAGE_OFFLOAD_REQUIRED'
+
+/**
+ * Whether the installed host records image offloads. Hosts that predate the
+ * executor never mark images `offloaded`, so asking them to would fail every
+ * later request instead of shrinking it.
+ */
+export function hostSupportsImageOffload(): boolean {
+  const exports = llm as Record<string, unknown>
+  return exports['IMAGE_OFFLOAD_REQUIRED_CODE'] === IMAGE_OFFLOAD_REQUIRED
+    && typeof exports['offloadedImageText'] === 'function'
+}
+
+/**
+ * How many of the oldest images still sent inline must be offloaded before
+ * the resolved request fits `maxBase64Bytes` of image data; zero when it fits.
+ * Images are counted depth-first in request order, skipping assistant
+ * messages, the same order the host's executor selects occurrences in.
+ * @param messages - the resolved request, after {@link resolveImages}.
+ * @param maxBase64Bytes - the route's budget for all inline image data.
+ */
+export function requiredImageOffloadCount(messages: readonly TranslatableMessage[], maxBase64Bytes: number): number {
+  const lengths: number[] = []
+  const visit = (blocks: readonly TranslatableBlock[]): void => {
+    for (const block of blocks) {
+      if (block.type === 'image' && 'dataBase64' in block) lengths.push(block.dataBase64.length)
+      else if (block.type === 'tool-result') visit(block.content)
+    }
+  }
+  for (const message of messages) {
+    if (message.role !== 'assistant') visit(message.content)
+  }
+  let excess = lengths.reduce((sum, bytes) => sum + bytes, 0) - maxBase64Bytes
+  let count = 0
+  while (excess > 0 && count < lengths.length) {
+    excess -= lengths[count]!
+    count += 1
+  }
+  return count
 }
 
 /**
