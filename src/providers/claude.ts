@@ -27,6 +27,7 @@ import {
   toAnthropicSystem,
   toAnthropicTools,
 } from '../translate/anthropic.js'
+import type { PromptCacheTtl } from '../translate/anthropic.js'
 import {
   httpLlmError,
   idleWatchdog,
@@ -551,6 +552,8 @@ export interface ClaudeAdapterOptions {
   resolveAttachments?: () => AttachmentStore | undefined
   /** Durable catalog store seeding capability metadata across restarts. */
   catalogStore?: CatalogPersistence
+  onCatalogChanged?: () => void
+  accountCatalogStore?: (account: string) => CatalogPersistence
   /**
    * Per-model default reasoning effort override (the Settings page's picker).
    * Returns the user-configured default for one model, or undefined to follow
@@ -559,6 +562,13 @@ export interface ClaudeAdapterOptions {
   defaultEffortOf?: (model: string) => string | undefined
   /** Resolves the Claude Code version to present (npm-backed); absent means the local floor. */
   resolveCliVersion?: () => Promise<string>
+  /** Lifetime of the request's cache breakpoints; absent means Anthropic's five-minute default. */
+  promptCacheTtl?: PromptCacheTtl
+  /**
+   * The user's Settings-page choice, read per request so a save applies to
+   * the next turn without a restart; undefined falls back to `promptCacheTtl`.
+   */
+  promptCacheTtlOverride?: () => PromptCacheTtl | undefined
 }
 
 /**
@@ -594,6 +604,10 @@ const CLAUDE_MODALITIES: readonly ('text' | 'image')[] = ['text', 'image']
  * @param maxTokens - the resolved output cap.
  * @param thinking - the thinking parameter, when the model takes one.
  * @param effort - the reasoning effort, when the model advertises efforts.
+ * @param cacheTtl - lifetime of every cache breakpoint; defaults to five minutes.
+ * Requests that carry a `purpose` (compaction, session titles) always use five
+ * minutes to preserve their existing auxiliary-request behavior. A five-minute
+ * mark can still read an entry a one-hour mark wrote.
  * @returns the JSON body to POST.
  */
 export function claudeRequestBody(
@@ -602,13 +616,15 @@ export function claudeRequestBody(
   maxTokens: number,
   thinking?: Record<string, unknown>,
   effort?: string,
+  cacheTtl?: PromptCacheTtl,
 ): Record<string, unknown> {
+  const ttl = options.purpose === undefined ? cacheTtl : undefined
   const anthropicMessages = toAnthropicMessages(messages)
-  markMessageCache(anthropicMessages)
+  markMessageCache(anthropicMessages, ttl)
   return {
     model: options.model,
     max_tokens: maxTokens,
-    system: toAnthropicSystem(options.system, messages),
+    system: toAnthropicSystem(options.system, messages, ttl),
     messages: anthropicMessages,
     ...options.tools !== undefined && options.tools.length > 0
       ? { tools: toAnthropicTools(options.tools) }
@@ -625,12 +641,14 @@ export class ClaudeAdapter extends LlmAdapter {
   private readonly catalog: ModelCatalogCache
   /** In-memory catalogs for non-default accounts (the persisted cache is the default's). */
   private readonly accountCatalogs = new Map<string, ModelCatalogCache>()
+  private accountCatalogsInvalidated = false
+  private readonly invalidatedAccounts = new Set<string>()
   /** Account whose snapshot currently lives in {@link catalog}; cleared on default change. */
   private catalogOwner: string | undefined
 
   constructor(private readonly options: ClaudeAdapterOptions) {
     super()
-    this.catalog = new ModelCatalogCache(options.catalogStore)
+    this.catalog = new ModelCatalogCache(options.catalogStore, undefined, options.onCatalogChanged)
   }
 
   private async fetchCatalog(account?: string, signal?: AbortSignal): Promise<DiscoveredModel[]> {
@@ -644,15 +662,22 @@ export class ClaudeAdapter extends LlmAdapter {
 
   /** Drop cached catalogs after login/logout so the next list does not reuse a stale plan. */
   clearAccountCatalog(account?: string): void {
-    if (account === undefined) this.accountCatalogs.clear()
-    else this.accountCatalogs.delete(account)
+    if (account === undefined) { this.accountCatalogsInvalidated = true; this.invalidatedAccounts.clear() }
+    else this.invalidatedAccounts.add(account)
+    if (account === undefined) {
+      for (const cache of this.accountCatalogs.values()) cache.invalidate()
+      this.accountCatalogs.clear()
+    } else {
+      this.accountCatalogs.get(account)?.invalidate()
+      this.accountCatalogs.delete(account)
+    }
     if (account === undefined || this.catalogOwner === account || this.catalogOwner === undefined) {
       this.catalogOwner = undefined
       this.catalog.invalidate()
     }
   }
 
-  /** Persisted cache for the default account; a throwaway cache for any other. */
+  /** Default and secondary accounts each seed their own persisted catalog. */
   private async catalogFor(account?: string): Promise<ModelCatalogCache> {
     const defaultKey = await this.options.tokens.defaultAccount()
     const key = account ?? defaultKey
@@ -665,7 +690,9 @@ export class ClaudeAdapter extends LlmAdapter {
     }
     let cache = this.accountCatalogs.get(key)
     if (cache === undefined) {
-      cache = new ModelCatalogCache()
+      cache = new ModelCatalogCache(this.options.accountCatalogStore?.(key), undefined, this.options.onCatalogChanged)
+      const invalidated = this.invalidatedAccounts.delete(key)
+      if (this.accountCatalogsInvalidated || invalidated) cache.invalidate()
       this.accountCatalogs.set(key, cache)
     }
     return cache
@@ -703,7 +730,7 @@ export class ClaudeAdapter extends LlmAdapter {
   }
 
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
-    const own = await this.listOwnModels(provider)
+    const own = await this.listOwnModels(provider, undefined, undefined, true)
     const pool = this.options.pool?.()
     if (pool === undefined) return own
     const extra = await pool.modelsForProvider(provider as ProviderId)
@@ -713,13 +740,13 @@ export class ClaudeAdapter extends LlmAdapter {
   }
 
   /** The provider's own catalog: union of every account, or one account when named. */
-  async listOwnModels(provider: string, account?: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]> {
+  async listOwnModels(provider: string, account?: string, signal?: AbortSignal, preferCached = false): Promise<readonly LlmModelInfo[]> {
     if (account === undefined) {
       const accounts = (await this.options.tokens.list()).map(entry => entry.key)
       if (accounts.length === 0) return []
       return unionAccountCatalogs(
         accounts,
-        (key, accountSignal) => this.listOwnModels(provider, key, accountSignal),
+        (key, accountSignal) => this.listOwnModels(provider, key, accountSignal, preferCached),
         { timeoutMs: DISCOVERY_TIMEOUT_MS, ...signal === undefined ? {} : { signal } },
       )
     }
@@ -729,11 +756,11 @@ export class ClaudeAdapter extends LlmAdapter {
     if (!this.options.discovery) return this.staticModels(provider)
     const catalog = await this.catalogFor(account)
     try {
-      const models = await discoverOrRetryAuth(
+      const models = await catalog.get(() => discoverOrRetryAuth(
         force => this.options.tokens.session(account, force),
         catalog,
-        () => catalog.get(() => this.fetchCatalog(account, signal)),
-      )
+        () => this.fetchCatalog(account, signal),
+      ), preferCached)
       return models.map(model => ({
         provider,
         id: model.id,
@@ -854,7 +881,8 @@ export class ClaudeAdapter extends LlmAdapter {
     const effort = options.reasoningEffort !== undefined && disc?.reasoning !== undefined
       ? String(options.reasoningEffort)
       : undefined
-    const body = claudeRequestBody(options, messages, maxTokens, thinking, effort)
+    const cacheTtl = this.options.promptCacheTtlOverride?.() ?? this.options.promptCacheTtl
+    const body = claudeRequestBody(options, messages, maxTokens, thinking, effort, cacheTtl)
     const cliVersion = await (this.options.resolveCliVersion ?? localClaudeCliVersion)()
     return proxiedFetch(CLAUDE_API_URL, {
       method: 'POST',

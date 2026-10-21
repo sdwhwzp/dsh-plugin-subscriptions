@@ -619,6 +619,8 @@ test('auth RPC: a subaccount cannot change provider credentials', async () => {
       ['manual', { provider: 'codex', input: 'callback-code' }],
       ['cancel', { provider: 'codex' }],
       ['logout', { provider: 'codex' }],
+      ['prepareReset', { account: 'owner-account' }],
+      ['consumeReset', { account: 'owner-account', ticket: 'owner-ticket' }],
     ] as const
 
     for (const [endpoint, payload] of requests) {

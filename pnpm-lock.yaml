@@ -5,22 +5,29 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
+  '@deepseek-ai/cordis': link:../../deepseek-harness/vendor/cordis
   '@deepseek-ai/dsh-api-remotes': link:../../deepseek-harness/packages/api/remotes
   '@deepseek-ai/dsh-attachment': link:../../deepseek-harness/packages/attachment/attachment
   '@deepseek-ai/dsh-client-connection': link:../../deepseek-harness/packages/client/connection
   '@deepseek-ai/dsh-client-locale': link:../../deepseek-harness/packages/client/locale
-  '@deepseek-ai/dsh-client-ui-commands': link:../../deepseek-harness/packages/client/ui-commands
+  '@deepseek-ai/dsh-client-ui-settings': link:../../deepseek-harness/packages/client/ui-settings
   '@deepseek-ai/dsh-client-ui-conversation': link:../../deepseek-harness/packages/client/ui-conversation
+  '@deepseek-ai/dsh-client-ui-commands': link:../../deepseek-harness/packages/client/ui-commands
   '@deepseek-ai/dsh-client-ui-primitives': link:../../deepseek-harness/packages/client/ui-primitives
   '@deepseek-ai/dsh-client-ui-renderer': link:../../deepseek-harness/packages/client/ui-renderer
-  '@deepseek-ai/dsh-client-ui-settings': link:../../deepseek-harness/packages/client/ui-settings
   '@deepseek-ai/dsh-client-ui-slots': link:../../deepseek-harness/packages/client/ui-slots
-  '@deepseek-ai/dsh-tools': link:../../deepseek-harness/packages/core/tools
-  '@deepseek-ai/dsh-commands': link:../../deepseek-harness/packages/interaction/commands
-  '@deepseek-ai/dsh-llm': link:../../deepseek-harness/packages/llm/llm
   '@deepseek-ai/dsh-home-paths': link:../../deepseek-harness/packages/util/home-paths
-  '@deepseek-ai/cordis': link:../../deepseek-harness/vendor/cordis
+  '@deepseek-ai/dsh-llm': link:../../deepseek-harness/packages/llm/llm
+  '@deepseek-ai/dsh-tools': link:../../deepseek-harness/packages/core/tools
   '@deepseek-ai/schemastery': link:../../deepseek-harness/vendor/schemastery
+  '@deepseek-ai/dsh-commands': link:../../deepseek-harness/packages/interaction/commands
+  '@deepseek-ai/dsh-web': link:../../deepseek-harness/packages/web/web
+  '@deepseek-ai/dsh-agent': link:../../deepseek-harness/packages/core/agent
+  '@deepseek-ai/dsh-scope': link:../../deepseek-harness/packages/core/scope
+  '@deepseek-ai/dsh-session-projection': link:../../deepseek-harness/packages/session/session-projection
+  '@deepseek-ai/dsh-system-prompt': link:../../deepseek-harness/packages/core/system-prompt
+  '@deepseek-ai/dsh-user-approval': link:../../deepseek-harness/packages/interaction/user-approval
+  '@deepseek-ai/dsh-util-values': link:../../deepseek-harness/packages/util/values
 
 importers:
 
@@ -44,6 +51,9 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: link:../../deepseek-harness/packages/core/tools
         version: link:../../deepseek-harness/packages/core/tools
+      '@deepseek-ai/dsh-web':
+        specifier: link:../../deepseek-harness/packages/web/web
+        version: link:../../deepseek-harness/packages/web/web
       '@deepseek-ai/schemastery':
         specifier: link:../../deepseek-harness/vendor/schemastery
         version: link:../../deepseek-harness/vendor/schemastery
@@ -81,9 +91,6 @@ importers:
       '@deepseek-ai/dsh-client-ui-slots':
         specifier: link:../../deepseek-harness/packages/client/ui-slots
         version: link:../../deepseek-harness/packages/client/ui-slots
-      '@deepseek-ai/dsh-invariants':
-        specifier: link:../../deepseek-harness/packages/runtime-diagnostics/invariants
-        version: link:../../deepseek-harness/packages/runtime-diagnostics/invariants
       '@deepseek-ai/dsh-scope':
         specifier: link:../../deepseek-harness/packages/core/scope
         version: link:../../deepseek-harness/packages/core/scope
@@ -99,9 +106,6 @@ importers:
       '@deepseek-ai/dsh-util-values':
         specifier: link:../../deepseek-harness/packages/util/values
         version: link:../../deepseek-harness/packages/util/values
-      '@deepseek-ai/dsh-web':
-        specifier: link:../../deepseek-harness/packages/web/web
-        version: link:../../deepseek-harness/packages/web/web
       '@types/node':
         specifier: ^24.0.0
         version: 24.13.3

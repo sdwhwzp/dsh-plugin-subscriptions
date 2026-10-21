@@ -1,7 +1,6 @@
 /**
- * The subscriptions-auth Remote namespace the web Settings page drives.
- * Transport authentication is owned by API Gateway; this service reads only
- * the verified principal stored for the active invocation.
+ * Exact subscriptions-auth Fetch routes used by the web Settings page.
+ * Connection supplies the authenticated account identity independently of request JSON.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -11,7 +10,7 @@ import { PROVIDER_IDS, type ProviderId } from './store.js'
 import type { ProviderUsage } from '../providers/common.js'
 import type { RpcResult } from '../compat.js'
 import type { AuthenticatedPrincipal } from '@deepseek-ai/dsh-llm'
-import type { HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
+import type { ConnectionFetchRoute, HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
 import type { ProxyConfigView, ProxyDraft, ProxyInput, ProxyTestResult } from '../http.js'
 import type { CliVersion } from '../providers/npm-cli-version.js'
 
@@ -19,15 +18,24 @@ import type { CliVersion } from '../providers/npm-cli-version.js'
 export const SUBSCRIPTIONS_AUTH_NAMESPACE = 'subscriptionsAuth'
 
 /**
- * The shared authenticated channel these endpoints ride. Upstream registers a
- * channel of its own; a multi-account gateway forwards a fixed prefix list, so
- * only the shared `/api` channel reaches the Host at all, and only it carries
- * the caller's verified principal.
+ * The shared channel forwarded by the account gateway to Connection.
  */
 export const SUBSCRIPTIONS_AUTH_CHANNEL = '/api'
 
-/** Endpoint prefix this plugin owns on the shared channel. */
-export const SUBSCRIPTIONS_AUTH_PREFIX = 'subscriptions-auth/'
+/** Exact endpoint prefix on the authenticated shared channel. */
+export const SUBSCRIPTIONS_AUTH_PREFIX = 'subscriptions-auth.'
+/**
+ * Every endpoint {@link dispatch} answers; each gets one exact Fetch route.
+ * Kept in one place so the route table and the switch cannot drift apart.
+ */
+export const SUBSCRIPTIONS_AUTH_ENDPOINTS = [
+  'providerSettings', 'setProviderSettings',
+  'status', 'login', 'manual', 'cancel', 'logout', 'setDefault', 'usage',
+  'image', 'video', 'prepareReset', 'consumeReset',
+  'speed', 'setSpeed',
+  'proxyGet', 'proxySet', 'proxyTest',
+  'modelDefaults', 'setModelDefault',
+] as const
 
 /** Media types the attachment store accepts (ImageMediaType). */
 const IMAGE_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] as const
@@ -52,16 +60,16 @@ export type SpeedTier = 'standard' | 'fast'
 
 /** `speed` endpoint value: the session's choice plus the visibility list. */
 export interface SpeedState {
-  /** The session's current speed tier (default `standard`). */
+  /** Explicit session speed, or the subagent's model default when supplied. */
   tier: SpeedTier
   /** Codex model ids whose catalog advertises a fast tier. */
   fastModels: string[]
 }
 
-/** Speed state the RPC handler delegates to (in-memory, per session). */
+/** Session overrides plus persisted subagent model defaults. */
 export interface SpeedController {
-  /** Current speed state: the session's tier and the fast-capable codex models. */
-  speed(sessionId: string): Promise<SpeedState>
+  /** Pass the current Codex model to resolve a subagent's default speed. */
+  speed(sessionId: string, model?: string): Promise<SpeedState>
   /** Set one session's speed tier. */
   setSpeed(sessionId: string, tier: SpeedTier): Promise<void>
 }
@@ -82,6 +90,7 @@ export interface AccountStatus {
 
 /** Login state of one provider, as rendered by the Settings page. */
 export interface ProviderStatus {
+  displayName?: string
   /** Whether a login attempt is currently waiting for its code. */
   busy: boolean
   /** Logged-in accounts, default first. */
@@ -136,6 +145,8 @@ export interface ProviderAccountCatalog {
 
 /** Provider and account preference operations behind providerSettings/setProviderSettings. */
 export interface ProviderSettingsController {
+  /** Local preferences only: status must not fetch a model catalog. */
+  displayName?(provider: ProviderId): string | undefined
   get(provider: ProviderId, force: boolean): Promise<unknown>
   set(provider: ProviderId, settings: unknown): Promise<void>
 }
@@ -149,6 +160,8 @@ export interface ModelDefaultsController {
 
 /** Provider-agnostic auth operations the RPC handler delegates to. */
 export interface AuthController {
+  prepareReset?(account: string, signal: AbortSignal): Promise<unknown>
+  consumeReset?(account: string, ticket: string, signal: AbortSignal): Promise<void>
   /** Current status of one provider. */
   status(provider: ProviderId): Promise<ProviderStatus>
   /**
@@ -206,6 +219,75 @@ export class BadRequest extends Error {}
 
 /** A subaccount may use assigned models but cannot inspect or mutate the owner's subscription. */
 class AdminForbidden extends Error {}
+
+/** Dispatcher receives only the identity admitted by Connection. */
+export type SubscriptionsRpcHandler = (endpoint: string, payload: unknown, signal: AbortSignal, principal: AuthenticatedPrincipal | undefined) => Promise<RpcResult<unknown>>
+
+/** Connection `client-request` envelope, as the browser rpc caller sends it. */
+interface ClientRequestEnvelope {
+  type: 'client-request'
+  rpcId: string
+  method: string
+  payload: unknown
+}
+
+function readEnvelope(body: unknown): ClientRequestEnvelope | undefined {
+  if (typeof body !== 'object' || body === null) return undefined
+  const record = body as Record<string, unknown>
+  if (record.type !== 'client-request' || typeof record.rpcId !== 'string' || typeof record.method !== 'string') return undefined
+  return { type: 'client-request', rpcId: record.rpcId, method: record.method, payload: record.payload }
+}
+
+function serverResponse(rpcId: string, result: RpcResult<unknown>): Response {
+  return Response.json({ type: 'server-response', rpcId, result })
+}
+
+/**
+ * Wrap one endpoint's RPC handler as an exact Fetch route: decode the
+ * `client-request` envelope the browser rpc caller posts, run the handler,
+ * and answer with the matching `server-response` envelope — the same wire
+ * contract the dedicated-channel bridge used to apply, reproduced here so
+ * `rpc.call('/api', 'subscriptions-auth.<endpoint>', payload)` keeps working
+ * unchanged on the browser side.
+ */
+function fetchRouteFor(endpoint: string, handler: SubscriptionsRpcHandler): ConnectionFetchRoute {
+  const method = `${SUBSCRIPTIONS_AUTH_PREFIX}${endpoint}`
+  return {
+    path: `/api/${method}`,
+    methods: ['POST'],
+    requestBody: 'buffered',
+    fetch: async (request, principal) => {
+      if (request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') {
+        return new Response('content type must be application/json', { status: 415 })
+      }
+      let body: unknown
+      try {
+        body = await request.json()
+      } catch {
+        return new Response('body is not JSON', { status: 400 })
+      }
+      const envelope = readEnvelope(body)
+      if (envelope === undefined) {
+        const rawId = (body as Record<string, unknown> | null)?.rpcId
+        return serverResponse(typeof rawId === 'string' ? rawId : 'invalid-request', {
+          ok: false,
+          error: { code: 'gateway/bad-request', message: 'invalid client-request message', details: { issues: [] } },
+        })
+      }
+      if (envelope.method !== method) {
+        return serverResponse(envelope.rpcId, {
+          ok: false,
+          error: {
+            code: 'gateway/bad-request',
+            message: `method ${JSON.stringify(envelope.method)} does not match endpoint ${JSON.stringify(method)}`,
+            details: { issues: [] },
+          },
+        })
+      }
+      return serverResponse(envelope.rpcId, await handler(endpoint, envelope.payload, request.signal, principal))
+    },
+  }
+}
 
 function ok(value: unknown): RpcResult<unknown> {
   return { ok: true, value }
@@ -483,7 +565,10 @@ async function dispatch(
         }) satisfies ProviderStatus), principal)] as const,
       ))
       return ok({
-        providers: Object.fromEntries(entries),
+        providers: Object.fromEntries(entries.map(([provider, status]) => {
+          const displayName = providerSettings?.displayName?.(provider)
+          return [provider, { ...status, ...(displayName ? { displayName } : {}) }]
+        })),
         canViewUsage: canViewUsage(principal),
         canManageCredentials: canManageCredentials(principal),
       })
@@ -520,12 +605,22 @@ async function dispatch(
       const provider = readProvider(payload)
       return ok(await controller.usage(provider, readString(payload, 'account'), signal, readForce(payload)))
     }
+    case 'prepareReset':
+      assertCanManageCredentials(principal)
+      if (!controller.prepareReset) throw new BadRequest('Reset redemption unavailable')
+      return ok(await controller.prepareReset(readString(payload, 'account'), signal))
+    case 'consumeReset':
+      assertCanManageCredentials(principal)
+      if (!controller.consumeReset) throw new BadRequest('Reset redemption unavailable')
+      await controller.consumeReset(readString(payload, 'account'), readString(payload, 'ticket'), signal)
+      return ok({ ok: true })
     case 'image':
       return ok(await controller.readImage(readImageRef(payload), signal))
     case 'video':
       return ok(await controller.readVideo(readVideoName(payload), signal))
     case 'speed':
-      return ok(await speed.speed(readSessionId(payload)))
+      return ok(await speed.speed(readSessionId(payload),
+        (payload as Record<string, unknown>).model === undefined ? undefined : readString(payload, 'model')))
     case 'setSpeed':
       await speed.setSpeed(readSessionId(payload), readSpeedTier(payload))
       return ok({ ok: true })
@@ -560,8 +655,8 @@ async function dispatch(
 }
 
 /**
- * Register the subscription-auth Remote service when the Typert registry exists.
- * @param ctx - plugin context; minimal profiles without Typert remain usable.
+ * Register exact authenticated Fetch routes when the Connection service exists.
+ * @param ctx - plugin context; profiles without Connection remain usable.
  * @param controller - the auth operations backing the endpoints.
  * @param speed - the per-session speed-tier state backing the Speed toggle.
  * @param proxy - optional proxy-config controller backing `proxyGet`/`proxySet`/`proxyTest`.
@@ -580,36 +675,15 @@ export function registerAuthRpc(
   // the service exists instead of probing once at apply time.
   ctx.inject(['connection'], (ctx) => {
     const connection = ctx.get('connection') as HostConnectionHandle
-    ctx.effect(
-      // These endpoints ride the shared authenticated `/api` channel rather than
-      // a channel of their own: a multi-account gateway forwards a fixed prefix
-      // list, so a private channel is unreachable, and `loopback` authority on
-      // one would admit every signed-in account to the owner's credentials.
-      // Interception keeps the caller's verified principal on every dispatch.
-      () => connection.rpc.intercept(
-        SUBSCRIPTIONS_AUTH_CHANNEL,
-        endpoint => endpoint.startsWith(SUBSCRIPTIONS_AUTH_PREFIX)
-          && endpoint.length > SUBSCRIPTIONS_AUTH_PREFIX.length,
-        async (endpoint, payload, signal, peer) => {
-          const principal = peer === undefined ? undefined : connection.principalOfPeer(peer)
-          try {
-            return await dispatch(
-              controller,
-              speed,
-              proxy,
-              modelDefaults,
-              endpoint.slice(SUBSCRIPTIONS_AUTH_PREFIX.length),
-              payload,
-              signal,
-              principal,
-              providerSettings,
-            )
-          } catch (error) {
-            return failure(error)
-          }
-        },
-      ),
-      'dsh-plugin-subscriptions: /api/subscriptions-auth/* rpc endpoints',
-    )
+    const handler: SubscriptionsRpcHandler = async (endpoint, payload, signal, principal) => {
+      try {
+        return await dispatch(controller, speed, proxy, modelDefaults, endpoint, payload, signal, principal, providerSettings)
+      } catch (error) {
+        return failure(error)
+      }
+    }
+    for (const endpoint of SUBSCRIPTIONS_AUTH_ENDPOINTS) {
+      ctx.effect(() => connection.fetch.register(fetchRouteFor(endpoint, handler)), `subscriptions-auth.${endpoint}`)
+    }
   })
 }

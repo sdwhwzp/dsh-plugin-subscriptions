@@ -3,8 +3,10 @@ import { mkdir, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { PROVIDER_IDS, type ProviderId } from './auth/store.js'
-import type { AccountPreferences, ProviderPreferences, SubscriptionTool } from './provider-settings-types.js'
-export type { AccountPreferences, ProviderPreferences, SubscriptionTool } from './provider-settings-types.js'
+import { PROMPT_CACHE_TTLS } from './provider-settings-types.js'
+import type { AccountPreferences, ProviderPreferences, SubscriptionTool, PromptCacheTtlSetting, SubagentSpeedTier } from './provider-settings-types.js'
+export { PROMPT_CACHE_TTLS } from './provider-settings-types.js'
+export type { AccountPreferences, ProviderPreferences, SubscriptionTool, PromptCacheTtlSetting, SubagentSpeedTier } from './provider-settings-types.js'
 
 export const PROVIDER_TOOLS = {
   codex: ['image_generate', 'web_search'],
@@ -28,6 +30,28 @@ export function validatePreferences(provider: ProviderId, input: unknown): Provi
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('settings must be an object')
   const raw = input as Record<string, unknown>
   const result: ProviderPreferences = {}
+  const nameOf = (value: unknown): string => {
+    if (typeof value !== 'string' || value.trim().length > 80 || /[\u0000-\u001f\u007f]/.test(value)) {
+      throw new Error('display name must be a single line of at most 80 characters')
+    }
+    return value.trim()
+  }
+  if (raw.displayName !== undefined) {
+    const name = nameOf(raw.displayName)
+    if (name) result.displayName = name
+  }
+  if (raw.modelDisplayNames !== undefined) {
+    if (!raw.modelDisplayNames || typeof raw.modelDisplayNames !== 'object' || Array.isArray(raw.modelDisplayNames)) {
+      throw new Error('modelDisplayNames must be a model-to-name map')
+    }
+    const names: Record<string, string> = Object.create(null) as Record<string, string>
+    for (const [id, value] of Object.entries(raw.modelDisplayNames)) {
+      if (!id.trim()) throw new Error('model display name requires a model id')
+      const name = nameOf(value)
+      if (name) names[id] = name
+    }
+    if (Object.keys(names).length) result.modelDisplayNames = names
+  }
   if (raw.accounts !== undefined) {
     if (!raw.accounts || typeof raw.accounts !== 'object' || Array.isArray(raw.accounts)) throw new Error('accounts must be an account-to-preferences map')
     result.accounts = Object.create(null) as Record<string, AccountPreferences>
@@ -69,6 +93,26 @@ export function validatePreferences(provider: ProviderId, input: unknown): Provi
         throw new Error('context windows must be positive safe integers')
       }
       result.contextWindows[model] = value
+    }
+  }
+  if (raw.promptCacheTtl !== undefined) {
+    if (provider !== 'claude') throw new Error('promptCacheTtl is currently supported only for Claude')
+    if (!(PROMPT_CACHE_TTLS as readonly unknown[]).includes(raw.promptCacheTtl)) {
+      throw new Error(`promptCacheTtl must be one of ${PROMPT_CACHE_TTLS.join(', ')}`)
+    }
+    result.promptCacheTtl = raw.promptCacheTtl as PromptCacheTtlSetting
+  }
+  if (raw.subagentSpeeds !== undefined) {
+    if (provider !== 'codex') throw new Error('subagent speeds are currently supported only for Codex')
+    if (!raw.subagentSpeeds || typeof raw.subagentSpeeds !== 'object' || Array.isArray(raw.subagentSpeeds)) {
+      throw new Error('subagent speeds must be a model-to-speed map')
+    }
+    result.subagentSpeeds = Object.create(null) as Record<string, SubagentSpeedTier>
+    for (const [model, tier] of Object.entries(raw.subagentSpeeds)) {
+      if (!model.trim() || (tier !== 'standard' && tier !== 'fast')) {
+        throw new Error('subagent speeds require a model id and either "standard" or "fast"')
+      }
+      result.subagentSpeeds[model] = tier
     }
   }
   if (raw.tools !== undefined) {
@@ -116,9 +160,25 @@ export class ProviderSettingsStore {
     return this.current.providers[provider]?.visibleModels?.includes(model) ?? true
   }
 
+  modelName(provider: ProviderId, model: string, fallback: string): string {
+    const names = this.current.providers[provider]?.modelDisplayNames
+    return names && Object.hasOwn(names, model) ? names[model] : fallback
+  }
+
   contextWindow(model: string): number | undefined {
     const windows = this.current.providers.codex?.contextWindows
     return windows && Object.hasOwn(windows, model) ? windows[model] : undefined
+  }
+
+  /** Read on every request so saved changes apply to the next subagent request. */
+  subagentSpeed(model: string): SubagentSpeedTier {
+    const speeds = this.current.providers.codex?.subagentSpeeds
+    return speeds && Object.hasOwn(speeds, model) ? speeds[model] : 'standard'
+  }
+
+  /** The Settings-page Claude cache TTL; undefined follows the plugin config. Read per request, so no clone. */
+  promptCacheTtl(): PromptCacheTtlSetting | undefined {
+    return this.current.providers.claude?.promptCacheTtl
   }
 
   /** Creation-time policy survives restarts and never changes an existing session. */

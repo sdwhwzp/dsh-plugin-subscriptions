@@ -12,12 +12,14 @@ import z from '@deepseek-ai/schemastery'
 import { errorChain } from '@deepseek-ai/dsh-llm'
 import type {
   AdapterRegistrationHandle,
+  GenerateOptions,
   LlmAdapter,
   LlmModelInfo,
   LlmResolvedModelInfo,
 } from '@deepseek-ai/dsh-llm'
 // Type-only: activates the `ctx.tools` Context merge for the inject block.
 import type {} from '@deepseek-ai/dsh-tools'
+import type {} from '@deepseek-ai/dsh-agent'
 // Type-only: activates the `ctx.web` Context merge for optional registration.
 import type {} from '@deepseek-ai/dsh-web'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
@@ -26,6 +28,7 @@ import { DeviceFlowManager, type DeviceAttempt } from './auth/device-flow.js'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { readClaudeCodeCredentials, refreshClaudeSynced } from './auth/claude-code-creds.js'
+import { ResetRedemption } from './providers/reset-redemption.js'
 import { BadRequest, registerAuthRpc } from './auth/rpc.js'
 import type {
   AuthController,
@@ -62,11 +65,14 @@ import type {
   StoredSession,
 } from './auth/store.js'
 import { DISCOVERY_TIMEOUT_MS, validateModels, withTimeout } from './providers/common.js'
+import { startCatalogRefresh } from './providers/catalog-refresh.js'
 import type { ModelEntry, ProviderUsage } from './providers/common.js'
 import { AccountTokenManager } from './providers/accounts.js'
 import type { AccountAwareAdapter } from './providers/accounts.js'
 import { DEFAULT_RATE_LIMIT_MAX_WAIT_MS, resolveRateLimitWait } from './providers/rate-limit.js'
 import type { RateLimitConfig } from './providers/rate-limit.js'
+import { DEFAULT_PROMPT_CACHE_TTL } from './translate/anthropic.js'
+import type { PromptCacheTtl } from './translate/anthropic.js'
 import { accountCatalogStore, catalogStore } from './providers/catalog-store.js'
 import { ClaudeCliVersionCache } from './providers/claude-cli-version.js'
 import type { CliVersion, NpmCliVersionCache } from './providers/npm-cli-version.js'
@@ -88,6 +94,8 @@ import {
   codexProfileClaims,
   exchangeCodexCode,
   fetchCodexUsage,
+  fetchCodexResetCredits,
+  consumeCodexResetCredit,
   isCodexPermanentRefreshError,
   refreshCodex,
 } from './providers/codex.js'
@@ -158,6 +166,14 @@ export interface Config {
   providers?: ProviderId[]
   /** Maximum provider idle time while one stream read is outstanding (default five minutes). */
   streamIdleTimeoutMs?: number
+  /**
+   * How long Anthropic keeps the Claude conversation cache after its last use:
+   * `'5m'` (default, the API's own default) or `'1h'`. One hour writes cache
+   * entries at 2× the input price instead of 1.25×, and pays off when you
+   * regularly pause longer than five minutes between messages. Claude only;
+   * compaction and session-title requests always stay on five minutes.
+   */
+  claudePromptCacheTtl?: PromptCacheTtl
   /** Whether and how long a route waits out a closed rate-limit window. */
   rateLimit?: RateLimitConfig
   /**
@@ -225,6 +241,7 @@ export const Config: z<Config> = z.object({
   providers: z.array(providerIdSchema).default(['codex', 'claude', 'grok', 'copilot', 'antigravity']),
   codexClientVersion: z.string(),
   streamIdleTimeoutMs: z.number().min(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
+  claudePromptCacheTtl: z.union(['5m', '1h']).default(DEFAULT_PROMPT_CACHE_TTL),
   rateLimit: z.object({
     wait: z.boolean().default(true),
     maxWaitMs: z.number().min(1).default(DEFAULT_RATE_LIMIT_MAX_WAIT_MS),
@@ -415,9 +432,28 @@ export class SubscriptionsAuthController implements AuthController {
     private readonly antigravityConfig: Config['antigravity'] = {},
     /** The CLI version each route presents, shown beside the provider in Settings. */
     private readonly clientVersions: Partial<Record<ProviderId, () => Promise<CliVersion | undefined>>> = {},
+    private readonly resetRedemption?: ResetRedemption,
+    /**
+     * Runs on a manual (forced) usage refresh of one account. The plugin
+     * clears that account's pool cooldowns here: the Settings "Refresh"
+     * button is the user's "retry now" — a stale cooldown left by a transient
+     * failure must not outlive an explicit re-check (issue #139).
+     */
+    private readonly onUsageForced?: (provider: ProviderId, account: string) => void,
   ) {}
 
+  prepareReset(account: string, signal: AbortSignal) {
+    if (!this.resetRedemption) throw new BadRequest('Reset redemption unavailable')
+    return this.resetRedemption.prepare(account, AbortSignal.any([signal, AbortSignal.timeout(20_000)]))
+  }
+
+  async consumeReset(account: string, ticket: string, signal: AbortSignal): Promise<void> {
+    if (!this.resetRedemption) throw new BadRequest('Reset redemption unavailable')
+    await this.resetRedemption.redeem(account, ticket, AbortSignal.any([signal, AbortSignal.timeout(20_000)]))
+  }
+
   usage(provider: ProviderId, account: string, signal: AbortSignal, force = false): Promise<ProviderUsage> {
+    if (force) this.onUsageForced?.(provider, account)
     const fetcher = this.usageFetchers[provider]
     if (fetcher === undefined) return Promise.resolve({ supported: false })
     if (this.poolUsage === undefined) return fetcher(account, signal)
@@ -697,6 +733,12 @@ export function apply(ctx: Context, config: Config): void {
   if (!Number.isFinite(streamIdleTimeoutMs) || streamIdleTimeoutMs <= 0) {
     throw new Error(`${name}: streamIdleTimeoutMs must be a positive finite number`)
   }
+  // The schema rejects anything else in the settings UI, but `apply` is also
+  // called with a plain object (tests, `--patch` overlays), so check here too.
+  const claudePromptCacheTtl = config.claudePromptCacheTtl ?? DEFAULT_PROMPT_CACHE_TTL
+  if (claudePromptCacheTtl !== '5m' && claudePromptCacheTtl !== '1h') {
+    throw new Error(`${name}: claudePromptCacheTtl must be '5m' or '1h'`)
+  }
   const rateLimit = resolveRateLimitWait(config.rateLimit, `${name}: rateLimit`)
   const catalog = resolveCatalog(config.models)
   // A non-empty configured catalog is an explicit override: it wins over live
@@ -734,6 +776,10 @@ export function apply(ctx: Context, config: Config): void {
     enabled: config.pool?.enabled !== false && (config.pool?.autoAccounts ?? config.pool?.autoFamilies ?? true),
     onWarn,
   })
+  const catalogChanged = (): void => {
+    poolAdapter?.invalidate()
+    for (const [route, handle] of handles) handle.replace([route])
+  }
   const authChanged = (provider: ProviderId, account?: string): void => {
     if (provider === 'codex' || provider === 'grok') imagePool.clear(provider, account)
     // Login, logout, and credential death all pass through here; a copilot
@@ -760,14 +806,25 @@ export function apply(ctx: Context, config: Config): void {
   // Usage lookups resolve the session through the refresh-aware path, so an
   // expired access token renews instead of failing the lookup.
   const usageFetchers: UsageFetchers = {}
-  // The composer Speed toggle's state: per-session, in-memory (a restart
-  // restores standard routing), gated per request on the model's discovered
-  // fast-tier support so a stale choice cannot leak onto a plain model.
+  // Explicit Speed choices are per-session and reset on restart. Subagents
+  // without an explicit choice use their persisted model default. Every
+  // request still gates Fast on the model's discovered capability.
   const speedBySession = new Map<string, SpeedTier>()
   // A deployment that does not permit the priority rate reports no fast-capable
   // model, which is the same state the UI already handles when logged out: the
   // toggle hides and `/fast` says the tier is unavailable.
   const fastTierOffered = config.fastTier !== false
+  const selectedSpeed = (sessionId: string, model?: string): SpeedTier => {
+    const explicit = speedBySession.get(sessionId)
+    if (explicit !== undefined) return explicit
+    // The request itself carries no subagent flag. The live registry exposes
+    // durable origin metadata for spawn, fork, and resumed subagents alike.
+    const agent = ctx.get('agents')?.get(sessionId as NonNullable<GenerateOptions['sessionId']>)
+    if (model !== undefined && agent?.session.header.origin === 'subagent') {
+      return preferences.subagentSpeed(parseAccountModelId(model)?.model ?? model)
+    }
+    return 'standard'
+  }
   let codexAdapter: CodexAdapter | undefined
   // Dropped on every copilot auth transition so replay state (captured
   // reasoning) never survives an account switch in memory.
@@ -796,8 +853,18 @@ export function apply(ctx: Context, config: Config): void {
         })
         codexTokens = tokens
         accountTokens.set('codex', tokens as AccountTokenManager<StoredSession>)
-        usageFetchers.codex = async (account, signal) =>
-          fetchCodexUsage(await tokens.session(account), proxiedFetch, signal)
+        usageFetchers.codex = async (account, signal) => {
+          const session = await tokens.session(account)
+          const usage = await fetchCodexUsage(session, proxiedFetch, signal)
+          try {
+            const resetCredits = await fetchCodexResetCredits(session, proxiedFetch, signal)
+            return { ...usage, resetCredits }
+          } catch (error) {
+            // Reset credits are an optional private endpoint; preserve ordinary usage.
+            const message = error instanceof Error ? error.message : String(error)
+            return { ...usage, resetCreditsError: message }
+          }
+        }
         let adapter!: CodexAdapter
         adapter = new CodexAdapter({
           ...config.codexClientVersion === undefined ? {} : { clientVersion: config.codexClientVersion },
@@ -812,6 +879,7 @@ export function apply(ctx: Context, config: Config): void {
           // Durable catalog: capability metadata (reasoning efforts) survives
           // restarts, so a resumed session's selected effort keeps resolving.
           catalogStore: catalogStore('codex'),
+          onCatalogChanged: catalogChanged,
           accountCatalogStore: account => accountCatalogStore('codex', account),
           defaultEffortOf: (model: string) => defaultEffortOf('codex', model),
           contextWindowOf: model => preferences.contextWindow(model),
@@ -819,7 +887,7 @@ export function apply(ctx: Context, config: Config): void {
           speedFor: (sessionId: string | undefined, model: string): boolean | Promise<boolean> =>
             fastTierOffered
             && sessionId !== undefined
-            && speedBySession.get(sessionId) === 'fast'
+            && selectedSpeed(sessionId, model) === 'fast'
             && adapter.supportsFastTier(model),
         })
         codexAdapter = adapter
@@ -855,8 +923,12 @@ export function apply(ctx: Context, config: Config): void {
           onWarn,
           resolveAttachments,
           catalogStore: catalogStore('claude'),
+          onCatalogChanged: catalogChanged,
+          accountCatalogStore: account => accountCatalogStore('claude', account),
           defaultEffortOf: (model: string) => defaultEffortOf('claude', model),
           resolveCliVersion: () => claudeVersion.resolve(),
+          promptCacheTtl: claudePromptCacheTtl,
+          promptCacheTtlOverride: () => preferences.promptCacheTtl(),
           pool: () => poolAdapter,
         })
         adapters.set('claude', adapter)
@@ -889,6 +961,8 @@ export function apply(ctx: Context, config: Config): void {
           // Durable catalog: capability metadata (reasoning efforts) survives
           // restarts, so a resumed session's selected effort keeps resolving.
           catalogStore: catalogStore('grok'),
+          onCatalogChanged: catalogChanged,
+          accountCatalogStore: account => accountCatalogStore('grok', account),
           defaultEffortOf: (model: string) => defaultEffortOf('grok', model),
           pool: () => poolAdapter,
         })
@@ -919,6 +993,8 @@ export function apply(ctx: Context, config: Config): void {
           // Durable catalog: capability metadata (per-model vision support,
           // context windows) survives restarts and network failures.
           catalogStore: catalogStore('copilot'),
+          onCatalogChanged: catalogChanged,
+          accountCatalogStore: account => accountCatalogStore('copilot', account),
           defaultEffortOf: (model: string) => defaultEffortOf('copilot', model),
           pool: () => poolAdapter,
         })
@@ -951,6 +1027,8 @@ export function apply(ctx: Context, config: Config): void {
           onWarn,
           resolveAttachments,
           catalogStore: catalogStore('antigravity'),
+          onCatalogChanged: catalogChanged,
+          accountCatalogStore: account => accountCatalogStore('antigravity', account),
           defaultEffortOf: model => defaultEffortOf('antigravity', model),
           pool: () => poolAdapter,
         })
@@ -976,9 +1054,11 @@ export function apply(ctx: Context, config: Config): void {
     const fetcherFor = (provider: ProviderId, account: string): (() => Promise<ProviderUsage>) | undefined => {
       switch (provider) {
         case 'codex': {
-          const tokens = codexTokens
-          return tokens === undefined ? undefined : async () =>
-            fetchCodexUsage(await tokens.session(account), proxiedFetch, AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS))
+          // Settings reads the pool cache too: use the complete usage fetcher
+          // so reset credits (and optional lookup errors) survive this path.
+          const fetcher = usageFetchers.codex
+          return fetcher === undefined ? undefined : () =>
+            fetcher(account, AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS))
         }
         case 'claude': {
           const tokens = claudeTokens
@@ -1021,7 +1101,7 @@ export function apply(ctx: Context, config: Config): void {
             if (accounts.length === 0) return
             const catalogs = (await Promise.all(accounts.map(async account => {
               const models = await withTimeout(
-                signal => adapter.listOwnModels(provider, account, signal),
+                signal => adapter.listOwnModels(provider, account, signal, true),
                 POOL_USAGE_TIMEOUT_MS,
               )
               const settings = preferences.get(provider).accounts
@@ -1069,7 +1149,7 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   const speed: SpeedController = {
-    async speed(sessionId) {
+    async speed(sessionId, model) {
       const fastModels = await codexAdapter?.fastCapableModels() ?? []
       const accountPreferences = preferences.get('codex').accounts
       for (const { key } of await codexTokens?.list() ?? []) {
@@ -1080,16 +1160,13 @@ export function apply(ctx: Context, config: Config): void {
         }
       }
       return {
-        tier: fastTierOffered ? speedBySession.get(sessionId) ?? 'standard' : 'standard',
+        tier: fastTierOffered ? selectedSpeed(sessionId, model) : 'standard',
         fastModels: fastTierOffered ? fastModels : [],
       }
     },
     async setSpeed(sessionId, tier) {
-      // Refused at the controller, not only hidden in the UI: the RPC is
-      // reachable directly, and a stored 'fast' would route at the priority
-      // rate the deployment turned off.
-      if (tier === 'standard' || !fastTierOffered) speedBySession.delete(sessionId)
-      else speedBySession.set(sessionId, tier)
+      // Keep explicit Standard too: a child can override a saved Fast default.
+      speedBySession.set(sessionId, fastTierOffered ? tier : 'standard')
     },
   }
   // Per-model default effort overrides (the Settings page's model pickers).
@@ -1178,6 +1255,17 @@ export function apply(ctx: Context, config: Config): void {
       handles.get(provider)?.replace([provider])
     },
   }
+  const resetRedemption = new ResetRedemption(
+    async (account, signal) => {
+      if (!usageFetchers.codex) throw new BadRequest('Codex unavailable')
+      return usageFetchers.codex(account, signal)
+    },
+    async (account, creditId, requestId, signal) => {
+      if (!codexTokens) throw new BadRequest('Codex unavailable')
+      await consumeCodexResetCredit(await codexTokens.session(account), creditId, requestId, proxiedFetch, signal)
+    },
+    account => poolUsage?.invalidate('codex', account),
+  )
   registerAuthRpc(ctx, new SubscriptionsAuthController(
     flows, deviceFlows, authChanged, resolveAttachments, usageFetchers, undefined, poolUsage, config.antigravity,
     {
@@ -1188,11 +1276,14 @@ export function apply(ctx: Context, config: Config): void {
       } : {},
       ...providers.includes('claude') ? { claude: presentedVersion(claudeVersion) } : {},
     },
+    resetRedemption,
+    (provider, account) => poolHealth?.clear(provider, account),
   ), speed, {
     get: () => proxyGetConfig(),
     set: input => proxySetConfig(input),
     test: payload => proxyTestConnection(payload.url, payload.proxy),
   }, modelDefaults, {
+    displayName: provider => preferences.get(provider).displayName,
     async get(provider, force) {
       await loadModelDefaults()
       const adapter = adapters.get(provider)
@@ -1209,9 +1300,10 @@ export function apply(ctx: Context, config: Config): void {
       const accounts = await accountTokens.get(provider)?.list() ?? []
       const accountCatalogs = await Promise.all(accounts.map(async account => ({
         account: account.key,
-        models: await withTimeout(signal => adapter.listOwnModels(provider, account.key, signal), DISCOVERY_TIMEOUT_MS).catch(() => undefined),
+        models: await withTimeout(signal => adapter.listOwnModels(provider, account.key, signal, !force), DISCOVERY_TIMEOUT_MS).catch(() => undefined),
       })))
       const tierIds = new Set((await poolAdapter?.modelsForProvider(provider).catch(() => []) ?? []).map(model => model.id))
+      const fastModels = new Set(provider === 'codex' ? await codexAdapter?.fastCapableModels() ?? [] : [])
       const rows = await Promise.all(models.map(async model => {
         const contexts: { default: number; max: number }[] = []
         if (provider === 'codex' && codexAdapter) {
@@ -1229,6 +1321,7 @@ export function apply(ctx: Context, config: Config): void {
           contextWindow: info?.context?.contextWindow,
           efforts: tierIds.has(model.id) ? [] : info?.reasoning?.efforts.map(({ id, name }) => ({ id, name })) ?? [],
           configured: defaultEffortOf(provider, model.id),
+          ...(provider === 'codex' ? { fastTier: !tierIds.has(model.id) && fastModels.has(model.id) } : {}),
           ...(contexts.length ? {
             defaultContextWindow: Math.min(...contexts.map(entry => entry.default)),
             maxContextWindow: Math.min(...contexts.map(entry => entry.max)),
@@ -1237,6 +1330,8 @@ export function apply(ctx: Context, config: Config): void {
       }))
       return {
         provider, settings: preferences.get(provider), models: rows, tools: PROVIDER_TOOLS[provider],
+        // The config value the "follow config" choice resolves to, for the Settings page to label it.
+        ...(provider === 'claude' ? { promptCacheTtlDefault: claudePromptCacheTtl } : {}),
         accounts: accounts.map(({ key, session }) => {
           const catalog = accountCatalogs.find(entry => entry.account === key)?.models
           return { key, label: accountOf(provider, session) ?? key, models: (catalog ?? []).map(({ id, name }) => ({ id, name })), ...(catalog === undefined ? { unavailable: true } : {}) }
@@ -1254,6 +1349,17 @@ export function apply(ctx: Context, config: Config): void {
       for (const [route, handle] of handles) handle.replace([route])
     },
   })
+
+  // OpenCode-style cadence: a startup check (five-minute cache freshness),
+  // then one hour between completed runs. Picker reads never schedule refreshes.
+  ctx.effect(() => startCatalogRefresh(async signal => {
+    await Promise.all([...adapters].map(async ([provider, adapter]) => {
+      if (signal.aborted || overridden.has(provider)) return
+      // Account unions bound each discovery and omit logged-out accounts.
+      await adapter.listOwnModels(provider, undefined, signal)
+    }))
+  }, () => onWarn('background model catalog refresh failed; next automatic attempt is in one hour')),
+  'dsh-plugin-subscriptions: hourly model catalog refresh')
 
   // Proactively keep keychain-bound Claude accounts synced with Claude Code's
   // own store (Keychain/file) every 5 minutes, so a session left idle between

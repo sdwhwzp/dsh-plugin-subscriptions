@@ -20,6 +20,7 @@ import {
 import { toResponsesInput } from '../src/translate/responses.js'
 import { GrokAdapter } from '../src/providers/grok.js'
 import { ClaudeAdapter, claudeRequestBody, fetchClaudeModels } from '../src/providers/claude.js'
+import { Config } from '../src/index.js'
 import { CopilotAdapter, fetchCopilotModels } from '../src/providers/copilot.js'
 import { ModelCatalogCache } from '../src/providers/common.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
@@ -176,6 +177,7 @@ const CODEX_MODELS_PAYLOAD = {
       supported_reasoning_levels: [
         { effort: 'low', description: 'fast' },
         { effort: 'high', description: 'thorough' },
+        { effort: 'ultra', description: 'client-side delegation mode' },
       ],
       default_reasoning_level: 'high',
       visibility: 'list',
@@ -289,6 +291,7 @@ test('resolveModel prefers discovered context window and reasoning efforts', asy
   assert.deepEqual(
     resolved.reasoning?.efforts.map(effort => effort.id),
     ['low', 'high'],
+    'the client-only ultra mode is dropped',
   )
   assert.equal(resolved.reasoning?.defaultEffort, 'high')
   // A model the catalog did not advertise falls back to static defaults.
@@ -541,6 +544,27 @@ test('codexRequestBody sends service_tier priority only on the fast tier', () =>
   assert.deepEqual(fast.reasoning, { effort: 'high', summary: 'auto' })
 })
 
+test('codexRequestBody lowers the client-only "ultra" effort to "max" on the wire', () => {
+  // A preference saved before discovery stopped listing "ultra" must not
+  // reach the Responses API verbatim (HTTP 400); Codex itself sends "max".
+  const ultra = codexRequestBody(
+    { provider: 'codex', model: 'gpt-6-sol', messages: [], reasoningEffort: ReasoningEffortId('ultra') },
+    { input: [] },
+    false,
+  )
+  assert.deepEqual(ultra.reasoning, { effort: 'max', summary: 'auto' })
+
+  // Every other effort is forwarded unchanged.
+  for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
+    const body = codexRequestBody(
+      { provider: 'codex', model: 'gpt-6-sol', messages: [], reasoningEffort: ReasoningEffortId(effort) },
+      { input: [] },
+      false,
+    )
+    assert.deepEqual(body.reasoning, { effort, summary: 'auto' })
+  }
+})
+
 test('codexRequestBody reconciles orphaned tool calls before dispatch', () => {
   const missing = codexRequestBody(
     { provider: 'codex', model: 'gpt-5.6-sol', messages: [] },
@@ -668,6 +692,87 @@ test('claudeRequestBody ships the cache breakpoints and never exceeds four', () 
   assert.deepEqual(body.thinking, { type: 'adaptive', display: 'summarized' })
   assert.deepEqual(body.output_config, { effort: 'high' })
   assert.equal(body.stream, true)
+})
+
+/** A long enough history that the request places all four breakpoints. */
+function claudeHistory(turns: number): Message[] {
+  const history: Message[] = [claudeMessage('s0', 'system', 'opening')]
+  for (let turn = 0; turn < turns; turn++) {
+    history.push(claudeMessage(`u${turn}`, 'user', `q${turn}`))
+    history.push(claudeMessage(`a${turn}`, 'assistant', `r${turn}`))
+  }
+  return history
+}
+
+/** Every `cache_control` marker in a request body, in wire order (tools, system, messages). */
+function cacheMarkers(body: Record<string, unknown>): unknown[] {
+  const system = body.system as Record<string, unknown>[]
+  const messages = body.messages as { content: Record<string, unknown>[] }[]
+  return [...system, ...messages.flatMap(entry => entry.content)]
+    .filter(block => block.cache_control !== undefined)
+    .map(block => block.cache_control)
+}
+
+test('claudeRequestBody without a TTL is byte-identical to the five-minute request', () => {
+  const history = claudeHistory(16)
+  const options = { provider: 'claude', model: 'claude-opus-5', messages: history, system: 'explicit' }
+  const implicit = claudeRequestBody(options, history, 32_000)
+  const explicit = claudeRequestBody(options, history, 32_000, undefined, undefined, '5m')
+  assert.equal(JSON.stringify(explicit), JSON.stringify(implicit), 'opting in to 5m changes nothing on the wire')
+  assert.deepEqual(cacheMarkers(implicit), Array(4).fill({ type: 'ephemeral' }))
+  assert.equal(JSON.stringify(implicit).includes('"ttl"'), false, 'no ttl field is sent by default')
+})
+
+test('claudeRequestBody marks every breakpoint one-hour when asked, and only the marker changes', () => {
+  const history = claudeHistory(16)
+  const options = { provider: 'claude', model: 'claude-opus-5', messages: history, system: 'explicit' }
+  const short = claudeRequestBody(options, history, 32_000)
+  const long = claudeRequestBody(options, history, 32_000, undefined, undefined, '1h')
+  assert.deepEqual(cacheMarkers(long), Array(4).fill({ type: 'ephemeral', ttl: '1h' }))
+  // Dropping the ttl field must give back exactly the five-minute request, so
+  // nothing else about the body (tools, ordering, thinking, metadata) moved.
+  assert.equal(JSON.stringify(long).replaceAll(',"ttl":"1h"', ''), JSON.stringify(short))
+})
+
+test('claudeRequestBody never puts a one-hour mark after a five-minute one', () => {
+  // Anthropic answers 400 to that ordering, so one TTL per request is the invariant.
+  for (const ttl of ['5m', '1h'] as const) {
+    const history = claudeHistory(16)
+    const body = claudeRequestBody(
+      { provider: 'claude', model: 'claude-opus-5', messages: history, system: 'explicit' },
+      history, 32_000, undefined, undefined, ttl,
+    )
+    const ttls = new Set(cacheMarkers(body).map(marker => (marker as { ttl?: string }).ttl ?? '5m'))
+    assert.deepEqual([...ttls], [ttl])
+  }
+})
+
+test('claudeRequestBody keeps auxiliary calls (compaction, session titles) on five minutes even when 1h is set', () => {
+  // Preserve the existing auxiliary-request TTL rather than applying the 1h option.
+  for (const purpose of ['compaction', 'session-title'] as const) {
+    const history = claudeHistory(16)
+    const body = claudeRequestBody(
+      { provider: 'claude', model: 'claude-opus-5', messages: history, system: 'explicit', purpose },
+      history, 32_000, undefined, undefined, '1h',
+    )
+    assert.deepEqual(cacheMarkers(body), Array(4).fill({ type: 'ephemeral' }), purpose)
+  }
+  const history = claudeHistory(16)
+  const ordinary = claudeRequestBody(
+    { provider: 'claude', model: 'claude-opus-5', messages: history, system: 'explicit' },
+    history, 32_000, undefined, undefined, '1h',
+  )
+  assert.deepEqual(cacheMarkers(ordinary), Array(4).fill({ type: 'ephemeral', ttl: '1h' }), 'ordinary requests still get 1h')
+})
+
+test('the plugin Config accepts 5m and 1h for claudePromptCacheTtl, defaults to 5m, and rejects the rest', () => {
+  const parse = Config as unknown as (value: unknown) => { claudePromptCacheTtl?: string }
+  assert.equal(parse({}).claudePromptCacheTtl, '5m')
+  assert.equal(parse({ claudePromptCacheTtl: '5m' }).claudePromptCacheTtl, '5m')
+  assert.equal(parse({ claudePromptCacheTtl: '1h' }).claudePromptCacheTtl, '1h')
+  for (const invalid of ['2h', '1H', '60m', '', 3600, true]) {
+    assert.throws(() => parse({ claudePromptCacheTtl: invalid }), /claudePromptCacheTtl/, `rejects ${JSON.stringify(invalid)}`)
+  }
 })
 
 test('claudeRequestBody omits tools, thinking and effort when the request carries none', () => {
@@ -863,7 +968,7 @@ test('grok discovery keeps last-known reasoning when the CLI catalog fails', asy
     onWarn: message => warnings.push(message),
     catalogStore: store,
   })
-  await adapter.listModels('grok')
+  await adapter.listOwnModels('grok')
   const resolved = await adapter.resolveModel('grok', 'grok-4.6')
   assert.deepEqual(resolved.reasoning?.efforts.map(effort => effort.id), ['xhigh', 'high'])
   assert.equal(resolved.reasoning?.defaultEffort, 'high')
@@ -896,7 +1001,7 @@ test('grok discovery keeps last-known reasoning when the CLI catalog omits a mod
     fetchFn: grokDualFetch({ data: GROK_CLI_PAYLOAD.data.filter(entry => entry.id === 'grok-4.5') }),
     catalogStore: store,
   })
-  await adapter.listModels('grok')
+  await adapter.listOwnModels('grok')
   const g46 = await adapter.resolveModel('grok', 'grok-4.6')
   assert.deepEqual(g46.reasoning?.efforts.map(effort => effort.id), ['xhigh', 'high'])
   const g45 = await adapter.resolveModel('grok', 'grok-4.5')
@@ -956,20 +1061,17 @@ function settle(): Promise<void> {
   return new Promise(resolve => setImmediate(resolve))
 }
 
-test('ModelCatalogCache serves the last-known catalog while a refresh runs or fails', async () => {
-  // ttlMs 0 makes every entry instantly stale, so each resolve exercises the
-  // stale-while-revalidate path.
+test('ModelCatalogCache keeps last-known metadata until a scheduled or explicit refresh', async () => {
   const cache = new ModelCatalogCache(undefined, 0)
   const first = await cache.resolve(() => Promise.resolve([{ id: 'a', name: 'A' }]))
   assert.deepEqual(first?.map(model => model.id), ['a'])
-  // A stale entry answers immediately even when the background refresh fails.
-  const second = await cache.resolve(() => Promise.reject(new Error('offline')))
+  let reads = 0
+  const second = await cache.resolve(async () => { reads++; return [{ id: 'b', name: 'B' }] })
   assert.deepEqual(second?.map(model => model.id), ['a'])
-  await settle()
-  // A successful background refresh serves the NEXT resolve.
-  const third = await cache.resolve(() => Promise.resolve([{ id: 'b', name: 'B' }]))
-  assert.deepEqual(third?.map(model => model.id), ['a'])
-  await settle()
+  assert.equal(reads, 0)
+  await assert.rejects(cache.get(() => Promise.reject(new Error('offline'))))
+  assert.deepEqual(cache.lastKnown()?.map(model => model.id), ['a'])
+  await cache.get(() => Promise.resolve([{ id: 'b', name: 'B' }]))
   const fourth = await cache.resolve(() => Promise.reject(new Error('unused')))
   assert.deepEqual(fourth?.map(model => model.id), ['b'])
 })
@@ -1082,7 +1184,7 @@ test('grok discovery writes the fetched catalog through to the store', async () 
   assert.equal(g46?.reasoning?.defaultEffort, 'high')
 })
 
-test('grok listModels retries a 401 after a forced refresh before invalidating', async () => {
+test('grok scheduled discovery retries a 401 after a forced refresh before invalidating', async () => {
   const store = memoryCatalogStore({
     at: Date.now() - 3_600_000,
     models: [{
@@ -1114,7 +1216,7 @@ test('grok listModels retries a 401 after a forced refresh before invalidating',
     fetchFn,
     catalogStore: store,
   })
-  const models = await adapter.listModels('grok')
+  const models = await adapter.listOwnModels('grok')
   assert.deepEqual(models.map(model => model.id), ['grok-4.6', 'grok-4.5', 'grok-build-0.1'])
   assert.equal(modelsCalls, 2)
   await settle()
@@ -1122,7 +1224,7 @@ test('grok listModels retries a 401 after a forced refresh before invalidating',
   assert.equal((await adapter.resolveModel('grok', 'grok-4.6')).reasoning?.defaultEffort, 'high')
 })
 
-test('grok listModels invalidates the catalog after a 401 that survives forced refresh', async () => {
+test('grok scheduled discovery invalidates the catalog after a 401 that survives forced refresh', async () => {
   const store = memoryCatalogStore({
     at: Date.now() - 3_600_000,
     models: [{
@@ -1149,7 +1251,7 @@ test('grok listModels invalidates the catalog after a 401 that survives forced r
     fetchFn,
     catalogStore: store,
   })
-  const models = await adapter.listModels('grok')
+  const models = await adapter.listOwnModels('grok')
   assert.deepEqual(models.map(model => model.id), ['grok-4'])
   await settle()
   assert.equal(store.saved(), undefined)

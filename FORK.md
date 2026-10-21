@@ -117,4 +117,4 @@ Provider preparation binds the upstream account pool and capabilities before gen
 
 ## Claude aggregate image budget
 
-The upstream request budget offloads the oldest inline images before the Claude payload exceeds its size limit. First-class tool messages keep their source, correlation id and error flag throughout image resizing and offloading. The deployment also accepts Harness `0.2.1-alpha.1`; its linked source supplies the authenticated RPC and image-offload executor.
+The upstream request budget offloads the oldest inline images before the Claude payload exceeds its size limit. First-class tool messages keep their source, correlation id and error flag throughout image resizing and offloading. The deployment also accepts Harness `0.2.1-rc.2`; its linked source supplies the authenticated RPC and image-offload executor.

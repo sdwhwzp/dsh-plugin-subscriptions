@@ -6,6 +6,12 @@ Harness 0.1.7 适配先从已认证 RPC 对端解析账号身份，再将 V4 工
 
 把你的 **ChatGPT(Codex)**、**Claude**、**Grok(X Premium)**、**GitHub Copilot** 和 **Google Antigravity** 订阅当作 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的 LLM provider 使用 —— 不需要 API key。Codex、Grok 和 Antigravity 通过 dsh web 界面 OAuth 登录(设置 → 订阅);Copilot 使用 GitHub OAuth 设备码流程;Claude 在存在 Claude Code 会话时直接导入凭据(macOS Keychain 或 `~/.claude/.credentials.json`),否则回退到同样的浏览器 OAuth 流程,因此不要求安装 Claude Code CLI。Token 保存在 `~/.dsh/plugins/subscriptions/auth.json`(权限 0600),过期自动刷新。
 
+## 订阅与模型显示名
+
+在 **设置 → 订阅 → 管理** 顶部修改订阅显示名，在 **编辑模型列表** 中修改模型显示名；使用同一组保存／取消按钮，留空或恢复默认后保存可恢复原名。名称按服务商和模型 ID 存储在原有 `provider-settings.json`，跨重启和目录刷新保留。名称为最多 80 字符的单行文本，仅改变显示，不改变 provider、模型 ID、推理参数或账号路由；现有账号别名可继续独立使用。
+
+订阅显示名也用于原生模型选择器的服务商分组标题；清空显示名并保存后，分组恢复为服务商默认名称。
+
 ## 演示
 
 设置 → **订阅**:每个 provider 的登录/退出,无需 API key。Claude 有 Claude Code 会话时导入凭据,否则和 Codex、Grok 一样走 OAuth(以下设置截图使用演示账号与目录数据):
@@ -29,6 +35,8 @@ Harness 0.1.7 适配先从已认证 RPC 对端解析账号身份，再将 V4 工
 ![推理等级选择器](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/model-effort.png)
 
 目录声明了 fast tier(即 codex CLI 的 fast 模式)的 Codex 模型,会在输入框工具行(模型选择器旁)多出一个**速度**开关 —— 标准 / 快速(`service_tier: priority`),按会话生效。`/fast` 斜杠命令提供同样的弹窗选择;当前模型不支持快速档时会提示原因。配置 `fastTier: false` 可整体撤下该档位:开关隐藏、`/fast` 提示不可用、请求不再带 `service_tier` —— 供应商按更高费率计费却仍报同一个 model id,事后任何记账都分不出两者,不允许按该费率支出的部署应关掉它。
+
+子代理的默认速度单独按模型设置：**设置 → 订阅 → ChatGPT（Codex）→ 管理 → 编辑模型列表 → 子代理默认速度**。点击「保存更改」后，对子代理的后续请求生效，正在运行的子代理也会采用新设置。该设置重启后保留，与父会话使用什么模型无关；主会话的速度不会传递给子代理。如果在某个子会话中明确选择了速度（包括标准档），则优先使用该会话的选择；会话内的明确选择重启后重置。快速档仍要求实际使用的 Codex 模型目录声明支持。宿主无法提供运行中 Agent 的来源元数据时，未明确设置速度的会话保持标准档。
 
 ![速度开关及其标准/快速菜单](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/speed-toggle.png)
 
@@ -85,7 +93,9 @@ Codex 编辑走 `/backend-api/codex/images/edits`，Grok 编辑走 `/v1/images/e
 
 ### DSH 兼容性
 
-`0.9.7` 版本新增对 DSH `0.2.0-rc.2` 的支持，开发依赖已固定到该版本。适配请求态消息、独立工具结果、工具准备状态和已省略图片的文本占位，同时保留旧历史格式转换。不会自动放行其他 `0.2` 预发布版本。
+`0.9.7` 版本新增对 DSH `0.2.0-rc.2` 的支持；DSH `0.2.1-alpha.2`、`0.2.1-alpha.3` 和 `0.2.1-rc.2` 同样受支持，开发依赖固定到 `0.2.1-rc.2`。适配请求态消息、独立工具结果、工具准备状态和已省略图片的文本占位，同时保留旧历史格式转换。`0.2.1-rc.2` 还要求每个工具调用头都带上参数，且 Web 运行时的 provider 覆盖改为 `Volatile` 引用。不会自动放行其他 `0.2` 预发布版本。
+
+DSH `0.2.1-rc.2` 加载时优先使用已声明的 `engines.dsh`；未声明时，要求所有 `@deepseek-ai/dsh` 和 `@deepseek-ai/dsh-*` peer 范围均匹配当前 DSH 版本，预发布版本也参与匹配。本插件未声明 `engines.dsh`，因此由 DSH peer 范围决定是否允许加载。`@deepseek-ai/cordis` 与 `@deepseek-ai/schemastery` 的 peer 影响包管理器的依赖解析，不参与这项加载检查；它们保留 `^4.0.1` / `^3.18.1` 下限，并额外列出 DSH `0.2.1-alpha.2`、`0.2.1-alpha.3` 自带的 `4.0.5-alpha` / `3.18.5-alpha` 版本，因为这些脱字符范围按 npm 默认的 semver 规则不包含上述预发布版本。
 
 当前版本支持已发布的 DSH `0.1.1-rc.2`、`0.1.2-alpha`/`rc`、`0.1.3-alpha`、`0.1.5-alpha`/`rc` 和 `0.1.7-rc` 版本线，包括 `0.1.5-rc.2` 和 `0.1.7-rc.2`。peer 范围使用 `0.1.5-alpha.1` 作为锚点，按照 npm semver 规则也覆盖之后的 `0.1.5-alpha`、`0.1.5-rc` 和稳定版 `0.1.5`；`0.1.7-rc.1` 锚点同样覆盖之后的 `0.1.7-rc` 和稳定版 `0.1.7`。DSH `0.1.6-alpha` 和 `0.1.7-alpha` 尚未单独验证，因此暂不纳入支持范围。
 
@@ -95,7 +105,9 @@ Codex 编辑走 `/backend-api/codex/images/edits`，Grok 编辑走 `/v1/images/e
 
 ### 刷新模型列表
 
-在 **设置 → 订阅 → 对应 provider → 编辑模型列表** 中点击 **刷新**，可绕过五分钟目录缓存，并通知会话模型选择器重新读取。这与刷新订阅用量是两个独立操作。如果显式配置了非空的 `models.<provider>`，仍使用指定列表，不进行在线发现。
+模型选择器优先使用已保存的目录，包括非默认账号的目录；打开或切换已缓存模型时，不等待在线发现，也不会因此发起刷新。插件启动时检查目录，跳过五分钟内已更新的快照；本轮检查结束后，隔 60 分钟再检查。检查失败时保留已有目录，等待下一轮自动检查。没有任何目录缓存的账号，首次仍需等待在线发现。
+
+在 **设置 → 订阅 → 对应 provider → 编辑模型列表** 中点击 **刷新**，可立即获取最新目录并更新会话模型选择器。后台刷新成功后也会通知选择器重新读取。这与订阅用量、凭据刷新是独立机制，后二者行为保持不变。如果显式配置了非空的 `models.<provider>`，仍使用指定列表，不进行在线发现。
 
 Codex 的目录可见性受请求中的 `client_version` 影响。默认自动读取 npm 官方 `@openai/codex` 包公开元数据中的稳定版本，不安装 CLI，也不向 npm 发送订阅登录凭据。查询成功后在内存缓存六小时；失败后五分钟再试，保留上次成功版本，首次失败则回退到已验证的 `0.153.4`。查询最多等待 5 秒，多账号共用查询，忽略预发布版和低于当前已知版本的结果。插件加载时还会把 Node 的 Happy Eyeballs 单地址建连尝试超时提高到至少 1.5 秒（不会降低宿主已设的更大值），因为默认 250ms 在一次 TCP 握手就超过该值的高延迟链路上会让所有连接失败。手动刷新模型列表也会重新检查版本。显式配置 `codexClientVersion: '0.153.4'` 时优先使用该值，并关闭自动查询；更改配置后需重启 DSH。模型仍以账号实际权限为准，详见[验证记录](docs/codex-catalog-refresh.md)。
 
@@ -171,7 +183,7 @@ Codex 模型还可填写上下文 token 数，留空跟随服务商。插件读�
 
 同一区块可开关 Codex 的图片生成，以及 Grok 的图片生成、视频生成和 X 搜索。工具策略只影响保存后新建的会话；已有会话及其重启后的恢复保留创建时的策略。图片生成是共享工具，只有 Codex 与 Grok 均关闭或未配置时才完全隐藏；调用时也不会回退到该会话已禁用的 provider。Claude 和 Copilot 当前没有本插件提供的独立工具开关。
 
-设置和工具策略历史独立存于 `~/.dsh/plugins/subscriptions/provider-settings.json`（权限 0600），不受五分钟模型发现缓存过期影响。原有非空 `models.<provider>` 配置仍决定基础目录；界面显示选择在该目录上生效。
+设置和工具策略历史独立存于 `~/.dsh/plugins/subscriptions/provider-settings.json`（权限 0600），不受模型目录刷新影响。原有非空 `models.<provider>` 配置仍决定基础目录；界面显示选择在该目录上生效。
 
 ### 编辑模型的默认推理档
 
@@ -187,6 +199,7 @@ Codex 模型还可填写上下文 token 数，留空跟随服务商。插件读�
   config:
     providers: [codex, claude]        # 子集;默认五个全启用
     streamIdleTimeoutMs: 300000
+    claudePromptCacheTtl: 5m           # Claude 提示缓存时长:5m(默认)或 1h
     rateLimit:
       wait: true                       # 等待限流窗口重开(默认开启)
       maxWaitMs: 21600000              # 单次等待上限;6 小时,足够覆盖 5 小时会话窗口
@@ -196,6 +209,20 @@ Codex 模型还可填写上下文 token 数，留空跟随服务商。插件读�
       copilot:                         # 手工条目会关闭 Copilot 目录发现
         - { id: gpt-5.6-sol, wire: responses }   # 仅 copilot:强制指定上游协议
 ```
+
+`claudePromptCacheTtl` 决定 Anthropic 在最近一次使用之后保留 Claude 对话缓存多久。默认 `5m` 发送的请求
+与之前的版本完全一致。设为 `1h` 时，每个缓存断点（工具+系统提示前缀，以及对话中的三个标记）都会带上
+`ttl: "1h"`；它们刻意使用同一个值，因为 Anthropic 会拒绝排在 5 分钟断点之后的 1 小时断点。缓存读取
+无论哪档价格相同；区别在于 1 小时档的*写入*按基础输入价的 2 倍定价，而不是 1.25 倍。
+如果你经常在两条消息之间停顿 5–60 分钟且能复用前缀，`1h` 可能更划算；收益取决于工作负载，不能据此
+保证订阅额度节省。如果经常在 5 分钟内复用缓存，更高的写入价格可能无法回本。Claude Code 自己在订阅下
+对主对话默认请求 1 小时，见
+[Claude Code 的提示缓存说明](https://code.claude.com/docs/en/prompt-caching#which-ttl-each-request-gets)。
+在已有缓存的对话上修改该设置可能产生一次前缀重写：带对话尾部缓存点的测试中，5 分钟写入之后的第一个
+1 小时请求重写了前缀，但只使用系统缓存点时可以命中。5 分钟请求可以读取 1 小时条目；用 1 小时标记读取
+旧的 5 分钟条目不会升级其生命周期。压缩（compaction）和会话标题请求保留原有辅助请求行为，仍使用 5 分钟。子代理
+（subagent）的请求没有插件可见的标记，因此与主对话一样遵循该设置。修改后需重启 DSH 生效，且只影响
+Claude；Codex、Grok、Copilot 与 Antigravity 使用各自的缓存机制。
 
 `wire`（仅 copilot 条目）把模型固定到 `chat-completions` 或 `responses`。不加该字段手工条目照常
 工作——它存在的原因是:实时目录不认识的手工模型否则会默认走 `/chat/completions`，而
@@ -313,7 +340,7 @@ git tag v0.9.8 && git push origin main v0.9.8
 ## 目录结构
 
 - `src/index.ts` —— 插件入口:配置 schema、adapter 注册、登录态变更通告、RPC 接线
-- `src/auth/` —— PKCE/JWT 工具、token 存储、OAuth 流程引擎(临时本地回调服务)、Claude Code 凭据读取器(Keychain/文件)、已认证的 `subscriptionsAuth` Typert Remote 服务
+- `src/auth/` —— PKCE/JWT 工具、token 存储、OAuth 流程引擎(临时本地回调服务)、Claude Code 凭据读取器(Keychain/文件)、已认证的 `subscriptions-auth.*` 精确 Fetch 路由
 - `src/providers/` —— 各 provider 的 OAuth 常量/换发/刷新 + `LlmAdapter` 实现，多账号 token 管理（`accounts.ts`），模型池（`pool.ts` + `pool-health.ts` / `pool-usage.ts` / `pool-family.ts`），以及 `rate-limit.ts`（限流重开时刻解析 + 重试策略）
 - `src/translate/` —— dsh `Message[]` 与 OpenAI Responses / Anthropic Messages 格式互转,SSE → `StreamChunk`
 - `src/tools/` —— `x_search`、`image_generate` 与 `video_generate`
@@ -321,3 +348,5 @@ git tag v0.9.8 && git push origin main v0.9.8
 ## Harness 0.2 部署
 
 本 fork 在原有运行时范围之外支持 Harness `0.2.0-rc.2`。部署时所有 Harness 依赖必须来自同一版本；账号授权、配置持久化和网页／桌面功能继续使用现有集成。
+
+设置、用量、速度选择和生成媒体通过共享认证连接调用精确的 `/api/subscriptions-auth.<endpoint>` Fetch 路由。Connection 在 JSON payload 之外传递已验证账号身份。全局服务商设置及 Codex 重置额度的准备与兑换仅允许管理员操作；普通账号保留已分配模型的使用权限。

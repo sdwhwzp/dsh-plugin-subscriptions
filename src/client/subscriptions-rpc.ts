@@ -1,7 +1,7 @@
 import type { ConnectionHandle, RpcResult } from '@deepseek-ai/dsh-api-remotes/client'
 
 const SUBSCRIPTIONS_AUTH_CHANNEL = '/api'
-const SUBSCRIPTIONS_AUTH_PREFIX = 'subscriptions-auth/'
+const SUBSCRIPTIONS_AUTH_PREFIX = 'subscriptions-auth.'
 
 /** Business error returned by a `subscriptions-auth` endpoint (error branch message). */
 export class SubscriptionsAuthError extends Error {}

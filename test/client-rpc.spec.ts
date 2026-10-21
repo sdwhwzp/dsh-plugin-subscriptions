@@ -16,7 +16,7 @@ test('settings and account calls reach the authenticated Host namespace with the
     },
   }
   for (const endpoint of ['providerSettings', 'setProviderSettings', 'setModelDefault', 'status', 'usage', 'proxyGet', 'login', 'speed']) {
-    assert.deepEqual(await callSubscriptionsAuth(rpc, endpoint, payload), { endpoint: `subscriptions-auth/${endpoint}` })
+    assert.deepEqual(await callSubscriptionsAuth(rpc, endpoint, payload), { endpoint: `subscriptions-auth.${endpoint}` })
   }
 })
 
@@ -27,15 +27,15 @@ test('generated media RPC preserves file references on the authenticated endpoin
       assert.equal(channel, SUBSCRIPTIONS_AUTH_CHANNEL)
       assert.ok(endpoint.startsWith(SUBSCRIPTIONS_AUTH_PREFIX))
       calls.push({ endpoint, payload })
-      return { ok: true, value: { mediaType: endpoint.endsWith('/image') ? 'image/png' : 'video/mp4', dataBase64: 'aGk=' } }
+      return { ok: true, value: { mediaType: endpoint.endsWith('.image') ? 'image/png' : 'video/mp4', dataBase64: 'aGk=' } }
     },
   }
   const ref = { attachmentId: 'image-1', mediaType: 'image/png', bytes: 2, width: 1, height: 1 } as const
   assert.deepEqual(await callSubscriptionsAuth(rpc, 'image', ref), { mediaType: 'image/png', dataBase64: 'aGk=' })
   assert.deepEqual(await callSubscriptionsAuth(rpc, 'video', { name: 'clip.mp4' }), { mediaType: 'video/mp4', dataBase64: 'aGk=' })
   assert.deepEqual(calls, [
-    { endpoint: 'subscriptions-auth/image', payload: ref },
-    { endpoint: 'subscriptions-auth/video', payload: { name: 'clip.mp4' } },
+    { endpoint: 'subscriptions-auth.image', payload: ref },
+    { endpoint: 'subscriptions-auth.video', payload: { name: 'clip.mp4' } },
   ])
 })
 

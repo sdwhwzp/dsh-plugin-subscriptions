@@ -6,6 +6,12 @@ English | [中文](README.zh.md)
 
 Use your **ChatGPT (Codex)**, **Claude**, **Grok (X Premium)**, **GitHub Copilot**, and **Google Antigravity** subscriptions as LLM providers in [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) — no API keys. Codex, Grok, and Antigravity log in via OAuth in the dsh web UI (Settings → Subscriptions), while Copilot uses the GitHub OAuth device flow; Claude imports credentials from an existing Claude Code session when there is one (macOS Keychain or `~/.claude/.credentials.json`) and otherwise falls back to the same browser OAuth flow, so the Claude Code CLI is not required. Tokens live at `~/.dsh/plugins/subscriptions/auth.json` (mode 0600) and refresh automatically.
 
+## Subscription and model display names
+
+Open **Settings → Subscriptions → Manage** to set a subscription display name, or edit a model's display name under **Edit model list**. Both share the existing Save/Cancel actions; clearing a name or choosing Reset to default and saving restores the original name. Names are single-line text of up to 80 characters, stored per provider and model ID in `provider-settings.json`, and survive restarts and catalog refreshes. They only change presentation: provider IDs, model IDs, reasoning settings, and account routing remain unchanged. Existing account aliases continue to work independently.
+
+Subscription display names also label provider groups in the native model picker. Saving a cleared name restores the provider's default group title.
+
 ## Demo
 
 Settings → **Subscriptions**: per-provider login/logout, no API keys. Claude imports credentials from Claude Code when available and otherwise uses OAuth, as Codex and Grok always do (settings screenshots use demo accounts and catalog data):
@@ -29,6 +35,8 @@ Models that advertise reasoning levels get an **Effort** selector in the same me
 ![Reasoning effort selector](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/model-effort.png)
 
 Codex models whose catalog advertises the fast tier (the codex CLI's fast mode) get a **Speed** toggle in the composer's tool row, next to the model selector — Standard or Fast (`service_tier: priority`), per session. The `/fast` slash command offers the same choice as a popup; it errors with an explanation when the current model has no fast tier. Set `fastTier: false` to withdraw the tier entirely: the toggle hides, `/fast` reports it unavailable, and no request carries `service_tier` — for a deployment that must not spend at the priority rate, which the provider bills higher and reports under the same model id, leaving accounting unable to tell the two apart.
+
+Subagents have a separate per-model default: **Settings → Subscriptions → ChatGPT (Codex) → Manage → Edit model list → Subagent default speed**. Save changes to apply it to subsequent requests, including running subagents. This setting persists across restarts and works regardless of the parent model; main-session Speed choices do not propagate to children. A speed explicitly selected in a child session overrides its model default, including Standard. Explicit session choices reset on restart. Fast still requires catalog support for the actual Codex model. Hosts without live agent origin metadata keep Standard unless the session has an explicit speed choice.
 
 ![Speed toggle with the Standard/Fast menu open](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/speed-toggle.png)
 
@@ -86,7 +94,9 @@ Image generation and editing share same-provider account scheduling: try the def
 
 ### DSH compatibility
 
-Version `0.9.7` adds support for DSH `0.2.0-rc.2`, with development dependencies pinned to that runtime. It handles request-only messages, first-class tool results, preparing tool views, and offloaded image placeholders while retaining legacy history translation. Other `0.2` prereleases are not implicitly allowed.
+Version `0.9.7` added support for DSH `0.2.0-rc.2`; DSH `0.2.1-alpha.2`, `0.2.1-alpha.3` and `0.2.1-rc.2` are supported as well, with development dependencies pinned to `0.2.1-rc.2`. It handles request-only messages, first-class tool results, preparing tool views, and offloaded image placeholders while retaining legacy history translation. `0.2.1-rc.2` additionally requires tool arguments on every call head and takes the web runtime's provider overrides as `Volatile` refs. Other `0.2` prereleases are not implicitly allowed.
+
+In DSH `0.2.1-rc.2`, the load-time check uses `engines.dsh` when declared; otherwise, every `@deepseek-ai/dsh` and `@deepseek-ai/dsh-*` peer must match the running DSH version. Prereleases participate in this check. This plugin does not declare `engines.dsh`, so its DSH peer ranges determine whether it can load. The `@deepseek-ai/cordis` and `@deepseek-ai/schemastery` peers affect package-manager dependency resolution, not this load-time check. They keep their `^4.0.1` / `^3.18.1` floors and also list the `4.0.5-alpha` / `3.18.5-alpha` builds bundled with DSH `0.2.1-alpha.2` and `0.2.1-alpha.3`, because those caret ranges exclude these prereleases under npm's default semver rules.
 
 The current release supports the published DSH `0.1.1-rc.2`, `0.1.2-alpha`/`rc`, `0.1.3-alpha`, `0.1.5-alpha`/`rc`, and `0.1.7-rc` lines, including `0.1.5-rc.2` and `0.1.7-rc.2`. The `0.1.5-alpha.1` peer-range anchor intentionally covers the later `0.1.5-alpha`, `0.1.5-rc`, and stable `0.1.5` builds under npm semver rules; the `0.1.7-rc.1` anchor likewise covers the later `0.1.7-rc` and stable `0.1.7` builds. DSH `0.1.6-alpha` and `0.1.7-alpha` are not included until they have been separately verified.
 
@@ -96,7 +106,9 @@ Open **Settings → Subscriptions → provider → Manage** to edit account alia
 
 ### Refreshing model lists
 
-In **Settings → Subscriptions → provider → Edit model list**, use **Refresh** to bypass the five-minute catalog cache and refresh the conversation model picker too. This is separate from refreshing subscription usage. If `models.<provider>` is explicitly configured with a non-empty list, that list still overrides discovery.
+The model picker uses saved catalogs immediately, including catalogs for non-default accounts, without waiting for network discovery or starting a refresh on each open or selection. The plugin checks catalogs at startup, skips snapshots fetched within the last five minutes, then checks again 60 minutes after the previous check finishes. Failed checks retain saved models and wait for the next scheduled check. An account without any saved catalog still waits for its first discovery.
+
+In **Settings → Subscriptions → provider → Edit model list**, use **Refresh** to fetch the current catalog immediately and update the conversation model picker. Successful background updates also invalidate the picker cache. This is separate from subscription-usage and credential refresh, whose behavior is unchanged. If `models.<provider>` is explicitly configured with a non-empty list, that list still overrides discovery.
 
 Codex catalog visibility depends on the `client_version` request parameter. By default the plugin reads the stable version from the official npm `@openai/codex` package's public metadata (no CLI installation or subscription credentials sent to npm). Successful lookups are cached in memory for six hours; failures retry after five minutes and retain the last successful version, or the verified `0.153.4` fallback on first use. The lookup has a 5-second deadline, shares in-flight work across accounts, and ignores prerelease or regressed versions. On load the plugin also raises Node's Happy Eyeballs per-address connect attempt timeout to at least 1.5 seconds (never lowering a larger host value), because the 250ms default drops every connection on links where one TCP handshake takes longer than that. Manual model-list refresh also rechecks the version. An explicit plugin configuration field, `codexClientVersion: '0.153.4'`, takes precedence and disables automatic lookup; restart DSH after changing it. Model availability remains account-dependent; see [verification notes](docs/codex-catalog-refresh.md).
 
@@ -172,7 +184,7 @@ Codex models also accept a context budget in tokens; leave it blank to follow th
 
 The same editor controls Codex Web Search and image generation, plus Grok image generation, video generation, and X search. Changes apply only to sessions created after saving; existing sessions retain their creation-time policy, including after restart. Image generation is shared: it disappears only when neither configured provider enables it, and execution never falls back to a provider disabled for that session. Claude and Copilot currently have no standalone subscription tools to configure.
 
-Preferences and tool-policy history live in `~/.dsh/plugins/subscriptions/provider-settings.json` (mode 0600), independently of the five-minute discovery cache. Existing non-empty `models.<provider>` configuration still defines the base catalog; visibility selections filter that catalog.
+Preferences and tool-policy history live in `~/.dsh/plugins/subscriptions/provider-settings.json` (mode 0600), independently of model-catalog refresh. Existing non-empty `models.<provider>` configuration still defines the base catalog; visibility selections filter that catalog.
 
 ### Reasoning defaults in the model editor
 
@@ -188,6 +200,7 @@ Existing defaults continue to load from and save to `~/.dsh/plugins/subscription
   config:
     providers: [codex, claude]        # subset; default all five
     streamIdleTimeoutMs: 300000
+    claudePromptCacheTtl: 5m           # Claude prompt-cache lifetime: 5m (default) or 1h
     rateLimit:
       wait: true                       # wait out a closed rate-limit window (default)
       maxWaitMs: 21600000              # ceiling on one wait; 6 h, covers a 5-hour session window
@@ -197,6 +210,26 @@ Existing defaults continue to load from and save to `~/.dsh/plugins/subscription
       copilot:                         # manual entries disable Copilot catalog discovery
         - { id: gpt-5.6-sol, wire: responses }   # copilot only: force the upstream protocol
 ```
+
+`claudePromptCacheTtl` sets how long Anthropic keeps the Claude conversation cache after its last use.
+It can also be changed without a restart from Settings → Subscriptions → Claude → Manage ("Prompt cache
+lifetime"); that choice is stored in `provider-settings.json`, overrides the config value, and applies
+from the next turn. The default, `5m`, sends exactly the request earlier releases sent. `1h` marks every cache breakpoint
+(the tools+system prefix and the three conversation marks) with `ttl: "1h"`. The same TTL is used for
+all of them on purpose: Anthropic rejects a one-hour breakpoint that follows a five-minute one.
+Cache reads have the same price for either TTL, but a one-hour *write* is priced at 2×
+the base input price instead of 1.25×. One hour may pay off when you often pause for 5–60 minutes
+between messages and can reuse the prefix; the benefit depends on the workload and does not establish
+subscription quota savings. With frequent reuse inside five minutes, the higher write price may not pay off.
+Claude Code itself requests the one-hour TTL for the main conversation on a subscription; see
+[Claude Code's prompt-caching notes](https://code.claude.com/docs/en/prompt-caching#which-ttl-each-request-gets).
+Changing the setting on an already-cached conversation may cause one prefix rewrite: with a conversation-tail
+breakpoint, the first one-hour request after five-minute writes rewrote the prefix in testing, while a
+system-only breakpoint could hit. A five-minute request can read a one-hour entry, but a one-hour-marked
+read does not upgrade a five-minute entry's lifetime. Compaction and session-title requests stay on five
+minutes to preserve their existing auxiliary-request behavior. Requests from subagents carry no marker the plugin can see, so they follow the setting
+along with the main conversation. It takes effect after restarting DSH and affects Claude only; Codex, Grok,
+Copilot and Antigravity use their own caching.
 
 `wire` (copilot entries only) pins a model to `chat-completions` or `responses`. Manual
 entries keep working without it — the field exists because a configured model the live
@@ -291,7 +324,7 @@ This plugin only supplies model routes. Approval policy lives elsewhere:
 This fork links its Harness development dependencies to the adjacent `deepseek-harness` checkout. The Host and Client TypeScript projects compile separately; `pnpm build` emits declarations under `lib/types/` and bundles both runtime entries.
 
 ```sh
-pnpm install   # devDependencies link to an adjacent deepseek-harness checkout
+pnpm install   # devDependencies link to an adjacent deepseek-harness 0.2.1-rc.2 checkout
 pnpm build     # tsc -b (lib/types/) + tsdown (lib/index.js and lib/client.js)
 pnpm test      # node --test over compiled unit specs
 ```
@@ -315,7 +348,7 @@ The workflow checks that the tag matches `package.json`, installs with the froze
 ## Layout
 
 - `src/index.ts` — plugin entry: config schema, adapter registration, auth-change re-announce, RPC wiring
-- `src/auth/` — PKCE/JWT helpers, token store, OAuth flow engine (temp loopback callback server), Claude Code credential reader (Keychain/file), and the authenticated `subscriptionsAuth` Typert Remote service
+- `src/auth/` — PKCE/JWT helpers, token store, OAuth flow engine (temp loopback callback server), Claude Code credential reader (Keychain/file), and the exact authenticated `subscriptions-auth.*` Fetch routes
 - `src/providers/` — per-provider OAuth constants/exchange/refresh + `LlmAdapter`s, multi-account token plumbing (`accounts.ts`), the pool (`pool.ts` + `pool-health.ts` / `pool-usage.ts` / `pool-family.ts`), and `rate-limit.ts` (reset-instant parsing + retry policy)
 - `src/translate/` — dsh `Message[]` ⟷ OpenAI Responses / Anthropic Messages / Antigravity wire formats, SSE → `StreamChunk`
 - `src/providers/codex-search.ts` — Codex provider for DSH's native `web_search` capability
@@ -324,7 +357,7 @@ The workflow checks that the tag matches `package.json`, installs with the froze
 
 ### Authenticated browser RPC
 
-Settings, usage, speed selection, and generated-media loaders call `/api/subscriptions-auth/<endpoint>` through the shared authenticated connection. The request method includes the `subscriptions-auth/` prefix, matching the Host interceptor. Global provider settings require administrator authority; ordinary accounts retain their assigned model access.
+Settings, usage, speed selection, and generated-media loaders call exact `/api/subscriptions-auth.<endpoint>` Fetch routes through the shared authenticated connection. Connection supplies the verified account identity separately from the JSON payload. Global provider settings and Codex reset-credit preparation or redemption require administrator authority; ordinary accounts retain their assigned model access.
 ## Harness 0.2 deployment
 
 This fork accepts Harness `0.2.0-rc.2` in addition to its existing runtime peer ranges. Deploy all Harness peers from one runtime release; account authorization, settings persistence, and browser/desktop behavior remain owned by the existing integrations.
