@@ -1,6 +1,6 @@
 # dsh-plugin-subscriptions [![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
 
-Harness 0.1.7 适配先从已认证 RPC 对端解析账号身份，再将 V4 工具结果消息转换为提供方请求；保留工具调用 ID、错误标志、附件解析和提供方回放元数据。
+Harness 0.2.1-rc.3 适配先从已认证 RPC 对端解析账号身份，再将 V4 工具结果消息转换为提供方请求；保留工具调用 ID、错误标志、附件解析和提供方回放元数据。
 
 [English](README.md) | 中文
 

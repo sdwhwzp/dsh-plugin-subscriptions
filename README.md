@@ -1,6 +1,6 @@
 # dsh-plugin-subscriptions [![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
 
-The Harness 0.1.7 integration resolves authenticated RPC peers to account principals and translates V4 tool-role messages before assembling provider requests. Tool call ids, error flags, attachment resolution, and provider replay metadata remain intact.
+The Harness 0.2.1-rc.3 integration resolves authenticated RPC peers to account principals and translates V4 tool-role messages before assembling provider requests. Tool call ids, error flags, attachment resolution, and provider replay metadata remain intact.
 
 English | [中文](README.zh.md)
 
