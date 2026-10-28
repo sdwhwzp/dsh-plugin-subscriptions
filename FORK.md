@@ -25,6 +25,8 @@ upstream registers. Upstream has no command surface for it.
 
 ## Building against this deployment's Harness
 
+The deployment SDK cohort is Harness 0.2.2-alpha.2 with Cordis 4.0.6-alpha.1. Shared-channel requests retain their authenticated account principal and existing provider-role checks.
+
 `AuthenticatedPrincipal` and the four-parameter shared-channel handler exist in
 this deployment's Harness build, not in the published packages, so the Harness
 dependencies resolve through `link:` to a sibling `deepseek-harness` checkout
