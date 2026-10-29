@@ -90,6 +90,8 @@ export interface AccountStatus {
 
 /** Login state of one provider, as rendered by the Settings page. */
 export interface ProviderStatus {
+  /** Saved picker visibility, attached by the status RPC from local preferences. */
+  visibleModels?: string[]
   displayName?: string
   /** Whether a login attempt is currently waiting for its code. */
   busy: boolean
@@ -147,6 +149,8 @@ export interface ProviderAccountCatalog {
 export interface ProviderSettingsController {
   /** Local preferences only: status must not fetch a model catalog. */
   displayName?(provider: ProviderId): string | undefined
+  /** Local picker selection, without triggering model discovery. */
+  visibleModels?(provider: ProviderId): string[] | undefined
   get(provider: ProviderId, force: boolean): Promise<unknown>
   set(provider: ProviderId, settings: unknown): Promise<void>
 }
@@ -567,7 +571,9 @@ async function dispatch(
       return ok({
         providers: Object.fromEntries(entries.map(([provider, status]) => {
           const displayName = providerSettings?.displayName?.(provider)
-          return [provider, { ...status, ...(displayName ? { displayName } : {}) }]
+          const visibleModels = providerSettings?.visibleModels?.(provider)
+          return [provider, { ...status, ...(displayName ? { displayName } : {}),
+            ...(visibleModels === undefined ? {} : { visibleModels }) }]
         })),
         canViewUsage: canViewUsage(principal),
         canManageCredentials: canManageCredentials(principal),
