@@ -1,3 +1,4 @@
+import './keep-alive.js'
 import { test } from 'node:test'
 import './keep-alive.js'
 import assert from 'node:assert/strict'

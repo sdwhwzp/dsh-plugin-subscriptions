@@ -7,16 +7,18 @@ import { callSubscriptionsAuth, SubscriptionsAuthError } from '../src/client/sub
 
 test('settings and account calls reach the authenticated Host namespace with their payload intact', async () => {
   const payload = { provider: 'codex', force: false }
+  const status = { providers: { codex: { accounts: [{ key: 'primary' }] } } }
   const rpc: ConnectionHandle['rpc'] = {
     async call(channel, endpoint, body) {
       assert.equal(channel, SUBSCRIPTIONS_AUTH_CHANNEL)
       assert.ok(endpoint.startsWith(SUBSCRIPTIONS_AUTH_PREFIX))
       assert.equal(body, payload)
-      return { ok: true, value: { endpoint } }
+      return { ok: true, value: endpoint === `${SUBSCRIPTIONS_AUTH_PREFIX}status` ? status : { endpoint } }
     },
   }
   for (const endpoint of ['providerSettings', 'setProviderSettings', 'setModelDefault', 'status', 'usage', 'proxyGet', 'login', 'speed']) {
-    assert.deepEqual(await callSubscriptionsAuth(rpc, endpoint, payload), { endpoint: `subscriptions-auth.${endpoint}` })
+    assert.deepEqual(await callSubscriptionsAuth(rpc, endpoint, payload),
+      endpoint === 'status' ? status : { endpoint: `subscriptions-auth.${endpoint}` })
   }
 })
 

@@ -5,6 +5,8 @@ import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { PROVIDER_IDS, type ProviderId } from './auth/store.js'
 import { PROMPT_CACHE_TTLS } from './provider-settings-types.js'
 import type { AccountPreferences, ProviderPreferences, SubscriptionTool, PromptCacheTtlSetting, SubagentSpeedTier } from './provider-settings-types.js'
+import { parseJsonText } from './json-text.js'
+import { antigravityModelId } from './antigravity-model-id.js'
 export { PROMPT_CACHE_TTLS } from './provider-settings-types.js'
 export type { AccountPreferences, ProviderPreferences, SubscriptionTool, PromptCacheTtlSetting, SubagentSpeedTier } from './provider-settings-types.js'
 
@@ -137,7 +139,7 @@ export class ProviderSettingsStore {
   constructor(path = dshHomePath('plugins', 'subscriptions', 'provider-settings.json')) {
     this.path = path
     try {
-      const raw = JSON.parse(readFileSync(path, 'utf8')) as Document
+      const raw = parseJsonText(readFileSync(path, 'utf8')) as Document
       if (!raw.providers || !Array.isArray(raw.toolHistory)) throw new Error('invalid settings document')
       for (const provider of PROVIDER_IDS) {
         if (Object.hasOwn(raw.providers, provider)) this.current.providers[provider] = validatePreferences(provider, raw.providers[provider])
@@ -157,7 +159,12 @@ export class ProviderSettingsStore {
   }
 
   visible(provider: ProviderId, model: string): boolean {
-    return this.current.providers[provider]?.visibleModels?.includes(model) ?? true
+    const selected = this.current.providers[provider]?.visibleModels
+    if (selected === undefined) return true
+    if (selected.includes(model)) return true
+    // Old selections name concrete variants; the picker now enumerates families.
+    return provider === 'antigravity' && antigravityModelId(model) === model
+      && selected.some(id => antigravityModelId(id) === model)
   }
 
   modelName(provider: ProviderId, model: string, fallback: string): string {

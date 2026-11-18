@@ -34,6 +34,43 @@ test('media tool views render the preparing phase before arguments are available
   }
 })
 
+test('media views observe streaming prompt updates and settled arguments', () => {
+  for (const [Component, name] of [[ImageGenerateToolview, 'image_generate'], [VideoGenerateToolview, 'video_generate']] as const) {
+    const args = new PartialArguments()
+    const block = { phase: 'preparing' as const, callId: 'media-call', name, turn: 0, step: 0, time: 0, subCalls: [], args }
+    const render = () => renderToStaticMarkup(createElement(Component, { block }))
+    assert.match(render(), new RegExp(name))
+    args.append('{"prompt":"Hello')
+    assert.equal(args.refresh(), true)
+    assert.match(render(), /Hello/)
+    args.append(' world","referenceImages":[{},{}]}')
+    assert.equal(args.refresh(), true)
+    assert.match(render(), /Hello world/)
+    if (name === 'image_generate') assert.match(render(), /\(2 ref\)/)
+    const settled = { kind: 'tool-result' as const, seq: 1, time: 0, callId: 'media-call', name,
+      args: PartialArguments.fromObject({ prompt: 'Finished', referenceImages: [{}, {}] }),
+      call: null, callTime: null, content: [], subCalls: [], isError: false }
+    assert.match(renderToStaticMarkup(createElement(Component, { block: settled })), /Finished/)
+  }
+})
+
+test('media views support legacy calls without argument views', () => {
+  for (const [Component, name] of [[ImageGenerateToolview, 'image_generate'], [VideoGenerateToolview, 'video_generate']] as const) {
+    const raw = JSON.stringify({ prompt: 'Legacy prompt', referenceImages: [{}, {}] })
+    const start = { phase: 'start', callId: 'legacy', name, turn: 0, step: 0, time: 0, subCalls: [], argsRaw: raw }
+    const result = { kind: 'tool-result', seq: 1, time: 0, callId: 'legacy', name,
+      call: { name, argsRaw: raw }, callTime: 0, content: [], subCalls: [], isError: false }
+    for (const legacy of [start, result]) {
+      const block = legacy as unknown as NonNullable<Parameters<typeof ImageGenerateToolview>[0]['block']>
+      const html = renderToStaticMarkup(createElement(Component, { block }))
+      assert.match(html, /Legacy prompt/)
+      if (name === 'image_generate') assert.match(html, /\(2 ref\)/)
+    }
+    const malformed = { ...start, argsRaw: 'invalid raw\nsecond line' } as unknown as NonNullable<Parameters<typeof ImageGenerateToolview>[0]['block']>
+    assert.match(renderToStaticMarkup(createElement(Component, { block: malformed })), /invalid raw/)
+  }
+})
+
 const windows: UsageWindow[] = Array.from({ length: 60 }, (_, i) => ({
   kind: 'other', scope: `gemini-model-${i}`, usedPercent: i,
 }))
@@ -51,8 +88,16 @@ test('Codex exhaustion notice renders localized credits and reset guidance only 
     const render = () => renderToStaticMarkup(createElement(CodexExhaustionNotice, { display: d, translate }))
     assert.match(render(), /role="status"/)
     assert.ok(render().includes(dictionary.usageBadgeAllCodexExhausted))
+    d.accounts[0]!.usage = { supported: true, credits: { hasCredits: true, unlimited: false, balance: '12.5' } }
+    assert.ok(render().includes(dictionary.usageBadgeCodexCreditsFallback))
+    assert.ok(!render().includes(dictionary.usageBadgeAllCodexExhausted))
+    d.accounts[0]!.usage = { supported: true, credits: { hasCredits: true, unlimited: false, balance: '0' } }
+    assert.ok(render().includes(dictionary.usageBadgeAllCodexExhausted))
+    delete d.accounts[0]!.usage
     d.accounts[1]!.windows[0]!.usedPercent = 99.99
     assert.equal(render(), '', 'do not treat rounded 100% as exhaustion')
+    d.accounts[1]!.windows[0]!.usedPercent = Infinity
+    assert.equal(render(), '', 'non-finite telemetry is unknown, not exhaustion')
     d.accounts[1]!.windows = []
     assert.equal(render(), '', 'unknown usage is not known exhaustion')
     d.accounts[1]!.windows = [{ kind: 'session', usedPercent: 105 }]
@@ -62,18 +107,48 @@ test('Codex exhaustion notice renders localized credits and reset guidance only 
   })), '')
 })
 
-test('Antigravity compact readout selects exact current model, not the entire catalog', () => {
-  const d = display('antigravity', [...windows, { kind: 'weekly', scope: 'gemini-model-59', usedPercent: 81 }])
-  assert.equal(compactSegment(d, 'gemini-model-59'), 'Antigravity Window 59% · Weekly 81%')
-  assert.equal(compactSegment(d), 'Antigravity 60 model quotas')
-  assert.equal(compactSegment(d, 'missing'), 'Antigravity Current model quota unavailable')
-  assert.ok(compactSegment(d, 'gemini-model-1').length < 60)
+test('native shared account panel follows used/remaining quota display mode despite an Argon-only whitelist', () => {
+  const shared: UsageWindow[] = [
+    { kind: 'weekly', scope: 'Gemini Models', usedPercent: 27 },
+    { kind: 'session', scope: 'Gemini Models', usedPercent: 7 },
+    { kind: 'weekly', scope: 'Claude and GPT models', usedPercent: 77 },
+    { kind: 'session', scope: 'Claude and GPT models', usedPercent: 0 },
+  ]
+  const filtered = visibleUsageWindows('antigravity', shared, ['gemini-4-argon-high'])
+  assert.deepEqual(filtered, shared, 'model visibility does not hide account-wide shared quotas')
+  for (const dictionary of [en, zh]) {
+    const translate = (key: keyof typeof en, params?: Record<string, unknown>) =>
+      dictionary[key].replace(/\{(\w+)\}/g, (_, name: string) => String(params?.[name] ?? ''))
+    const usedHtml = renderToStaticMarkup(createElement(AccountWindows, {
+      windows: filtered, model: 'gemini-4-argon', provider: 'antigravity', translate,
+    }))
+    assert.equal((usedHtml.match(/role="progressbar"/g) ?? []).length, 4)
+    for (const percent of [27, 7, 77, 0]) assert.ok(usedHtml.includes(translate('quotaUsedPercent', { percent })))
+    assert.ok(!usedHtml.includes('gemini-4-argon-') && !usedHtml.includes('<details'))
+    assert.equal(compactSegment(display('antigravity', shared), 'gemini-4-argon', translate),
+      `Antigravity · ${translate('quotaDefaultAccount')} ${translate('usageWeekly')} ${translate('quotaUsedPercent', { percent: 27 })} · ${translate('usageFiveHourLimit')} ${translate('quotaUsedPercent', { percent: 7 })}`)
+
+    const remainingHtml = renderToStaticMarkup(createElement(AccountWindows, {
+      windows: filtered, model: 'gemini-4-argon', provider: 'antigravity', translate, mode: 'remaining',
+    }))
+    for (const percent of [73, 93, 23, 100]) assert.ok(remainingHtml.includes(translate('quotaRemainingPercent', { percent })))
+    assert.equal(compactSegment(display('antigravity', shared), 'gemini-4-argon', translate, 'remaining'),
+      `Antigravity · ${translate('quotaDefaultAccount')} ${translate('usageWeekly')} ${translate('quotaRemainingPercent', { percent: 73 })} · ${translate('usageFiveHourLimit')} ${translate('quotaRemainingPercent', { percent: 93 })}`)
+  }
 })
 
-test('compact summary uses default account and preserves bounded non-Antigravity windows', () => {
+test('Antigravity compact readout selects exact current model, not the entire catalog', () => {
+  const d = display('antigravity', [...windows, { kind: 'weekly', scope: 'gemini-model-59', usedPercent: 81 }])
+  assert.equal(compactSegment(d, 'gemini-model-59'), 'Antigravity · Default account Window 59% used · Weekly 81% used')
+  assert.equal(compactSegment(d), 'Antigravity · Default account 60 model quotas')
+  assert.equal(compactSegment(d, 'missing'), 'Antigravity · Default account Current model quota unavailable')
+  assert.ok(compactSegment(d, 'gemini-model-1').length < 90)
+})
+
+test('compact summary counts signed-in accounts without aggregating their percentages', () => {
   const d = display('codex', [{ kind: 'session', usedPercent: 13 }, { kind: 'weekly', usedPercent: 25 }])
   d.accounts.unshift({ key: 'other', isDefault: false, windows: [{ kind: 'session', usedPercent: 99 }] })
-  assert.equal(compactSegment(d), 'Codex 5h 13% · Wk 25%')
+  assert.equal(compactSegment(d), 'Codex · 2 signed-in accounts')
   assert.ok(compactSegment(display('codex')).endsWith('+58'))
 })
 
@@ -198,4 +273,28 @@ test('model reader observes switches within the same provider and handles missin
   assert.deepEqual(await read(), { provider: 'antigravity', model: 'two' })
   assert.equal(await createCurrentModelReader(() => undefined, 'session')(), undefined)
   assert.equal(await createCurrentModelReader(() => ({ directoryFor: () => ({ load: async () => ({ current: null }) }) }), 'session')(), undefined)
+})
+
+test('Antigravity badge previews variant quota scopes for the grouped current model', () => {
+  const windows: UsageWindow[] = [
+    { kind: 'other', scope: 'claude-opus-5-5-medium', usedPercent: 70 },
+    { kind: 'other', scope: 'gemini-4-argon-high', usedPercent: 20 },
+    { kind: 'weekly', scope: 'gemini-4-argon-low', usedPercent: 40 },
+  ]
+  const preview = previewWindows(windows, 'gemini-4-argon', 'antigravity')
+  assert.deepEqual(preview.shown, windows.slice(1))
+  assert.deepEqual(preview.hidden, [windows[0]])
+})
+
+test('single-account summaries identify fallback source, mode, stale data and unknown values', () => {
+  const d = display('claude', [{ kind: 'weekly', scope: 'Opus', usedPercent: 28 }])
+  d.accounts[0]!.isDefault = false
+  d.accounts[0]!.usage = { supported: true, stale: true, fetchedAt: 1 }
+  assert.match(compactSegment(d, undefined, undefined, 'remaining'), /Listed account.*72% remaining.*stale/)
+  d.accounts[0]!.windows[0]!.usedPercent = NaN
+  assert.match(compactSegment(d, undefined, undefined, 'remaining'), /Unknown quota/)
+  assert.doesNotMatch(compactSegment(d, undefined, undefined, 'remaining'), /100%/)
+  d.accounts.push({ key: 'unknown', isDefault: false, windows: [] })
+  assert.match(compactSegment(d), /2 signed-in accounts/)
+  assert.doesNotMatch(compactSegment(d), /%/)
 })

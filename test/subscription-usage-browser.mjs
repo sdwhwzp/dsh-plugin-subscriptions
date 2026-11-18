@@ -53,6 +53,19 @@ try {
   assert.match(await badge.innerText(), /^我的 Grok /)
   await badge.click()
   await panel.waitFor()
+  const assertPanelInsideViewport = async () => {
+    const box = await panel.boundingBox()
+    const viewport = page.viewportSize()
+    assert.ok(box && viewport && box.x >= 11 && box.y >= 11 && box.x + box.width <= viewport.width - 11 && box.y + box.height <= viewport.height - 11)
+  }
+  await assertPanelInsideViewport()
+  await page.setViewportSize({ width: 360, height: 720 })
+  await page.waitForFunction(() => {
+    const box = document.querySelector('[role=dialog]')?.getBoundingClientRect()
+    return box && box.left >= 11 && box.top >= 11 && box.right <= innerWidth - 11 && box.bottom <= innerHeight - 11
+  })
+  await assertPanelInsideViewport()
+  await page.setViewportSize({ width: 900, height: 900 })
   assert.match(await panel.locator('section').first().innerText(), /^我的 Grok/)
   await page.keyboard.press('Escape')
   await page.getByRole('button', { name: 'Reset Grok', exact: true }).click()
@@ -104,7 +117,7 @@ try {
   await reopenAfter('Hide current Google model')
   await waitGoogleRows(2)
   assert.equal(await anti.locator('dt:visible').count(), 0, 'hidden current model must not bypass the filter')
-  assert.match(await badge.innerText(), /Current model quota unavailable/)
+  assert.match(await badge.innerText(), /2 signed-in accounts/)
   await reopenAfter('Clear Google models')
   await waitGoogleRows(0)
   assert.equal(await anti.getByText('No quota windows match the selected models.', { exact: true }).count(), 2)
@@ -114,7 +127,9 @@ try {
   await page.getByRole('button', { name: 'Show all Google models', exact: true }).click()
   await badge.click()
   await waitGoogleRows(60)
-  assert.match(await badge.innerText(), /29%/, 'raw cached quotas survive hiding and can be restored after a failed fetch')
+  assert.match(await badge.innerText(), /2 signed-in accounts/)
+  assert.match(await anti.innerText(), /29% used/, 'raw cached quotas survive hiding and can be restored after a failed fetch')
+  assert.match(await anti.innerText(), /Last known usage; refresh unavailable/)
   console.log('Google visibility: previews, expanded counts, multiple accounts, empty selection and raw-cache recovery verified')
   // Change the preference from a second tab while the quota dialog is open.
   const other = await context.newPage()

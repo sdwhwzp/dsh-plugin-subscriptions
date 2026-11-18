@@ -56,6 +56,10 @@ model (the state the UI already renders as a hidden toggle and an unavailable
 `/fast`), `setSpeed()` refuses to store the tier, and `speedFor()` never sends
 `service_tier`.
 
+With the priority tier enabled, composer speed preferences belong to the authenticated
+Host account. Session changes and saved model choices use the authentication source
+and immutable account ID. Single-user profiles retain their existing preferences file.
+
 Upstream can carry this as an ordinary config field; offer it upstream before
 carrying the divergence further.
 

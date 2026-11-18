@@ -5,9 +5,9 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { Context } from '@deepseek-ai/cordis'
-import AgentRegistry from '@deepseek-ai/dsh-agent'
+import AgentRegistry, { agentEvents } from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
+import type { AuthenticatedPrincipal, GenerateOptions } from '@deepseek-ai/dsh-llm'
 import type { AccountAwareAdapter } from '../src/providers/accounts.js'
 import { accountModelId } from '../src/providers/account-preferences.js'
 import { saveAccountSession } from '../src/auth/store.js'
@@ -32,7 +32,7 @@ test('main speed and per-model subagent defaults stay independent through RPC, r
     }
     throw new Error(`Unexpected outbound request: ${url}`)
   })
-  const mount = async (withAgents = true, pooling = false) => {
+  const mount = async (withAgents = true, pooling = false, fastTier = true) => {
     const ctx = new Context()
     const agents = withAgents ? new AgentRegistry(ctx) : undefined
     const adapterMap = new Map<string, AccountAwareAdapter>()
@@ -42,13 +42,14 @@ test('main speed and per-model subagent defaults stay independent through RPC, r
     } })
     const connection = createFakeConnection()
     ctx.provide('connection', connection.connection)
-    const runtime = ctx.plugin(plugin, { providers: ['codex'], codexClientVersion: '0.100.0', pool: { enabled: pooling } })
-    await new Promise(resolve => setTimeout(resolve, 50))
+    const runtime = ctx.plugin(plugin, { providers: ['codex'], codexClientVersion: '0.100.0', fastTier, pool: { enabled: pooling } })
+    await runtime
     assert.ok(connection.registered())
-    const call = (endpoint: string, payload: unknown) => connection.handler(endpoint, payload, new AbortController().signal)
+    const call = (endpoint: string, payload: unknown, principal?: AuthenticatedPrincipal) =>
+      connection.handler(endpoint, payload, new AbortController().signal, principal)
     const register = (id: string, header: Record<string, unknown>, provider = 'codex') => {
       const agent = { id, ctx, options: { provider }, session: { id, header: { id, ...header } } } as unknown as Agent
-      agents!.enter(agent, undefined)
+      agents!.enter(agent)
     }
     if (agents) {
       register('parent', {}, 'claude')
@@ -74,7 +75,14 @@ test('main speed and per-model subagent defaults stay independent through RPC, r
         accounts: { a: { independentEntry: true } },
       } })).ok, true)
     }
-    return { runtime, call, stream, setSpeed, setDefaults }
+    const request = async (principal: AuthenticatedPrincipal) => {
+      const agent = agents?.get('parent' as NonNullable<GenerateOptions['sessionId']>)
+      assert.ok(agent)
+      await agentEvents(ctx, agent).waterfall('agent/request', {
+        principal, turn: 1, step: 1, signal: new AbortController().signal,
+      }, async () => ({ provider: 'codex', model: 'fast-model' }))
+    }
+    return { runtime, call, stream, setSpeed, setDefaults, request }
   }
   let host: Awaited<ReturnType<typeof mount>> | undefined
   try {
@@ -108,10 +116,16 @@ test('main speed and per-model subagent defaults stay independent through RPC, r
     await host.stream('child', undefined)
     await host.stream('nested', 'priority')
     assert.equal((await host.call('speed', { sessionId: 'child', model: 'fast-model' }) as { value: { tier: string } }).value.tier, 'standard')
+    // Model-bound choices survive switching and restart, without changing child defaults.
+    assert.equal((await host.call('setSpeed', { sessionId: 'parent', model: 'fast-model', tier: 'fast' })).ok, true)
+    assert.equal((await host.call('setSpeed', { sessionId: 'parent', model: 'plain-model', tier: 'standard' })).ok, true)
+    assert.equal((await host.call('speed', { sessionId: 'fresh', model: 'fast-model' }) as { value: { tier: string } }).value.tier, 'fast')
     await host.runtime.dispose()
     host = await mount(true, true)
-    await host.stream('parent', undefined)
-    await host.stream('child', 'priority') // saved default survives, explicit choices do not
+    assert.equal((await host.call('speed', { sessionId: 'fresh', model: 'fast-model' }) as { value: { tier: string } }).value.tier, 'fast')
+    assert.equal((await host.call('speed', { sessionId: 'fresh', model: 'plain-model' }) as { value: { tier: string } }).value.tier, 'standard')
+    await host.stream('parent', 'priority') // remembered composer model choice survives
+    await host.stream('child', 'priority') // saved child default stays independent
     await host.stream('child', 'priority', accountModelId('a', 'fast-model'))
     supportsFast = false
     await host.call('providerSettings', { provider: 'codex', force: true })
@@ -120,9 +134,33 @@ test('main speed and per-model subagent defaults stay independent through RPC, r
     supportsFast = true
     host = await mount(false)
     await host.call('providerSettings', { provider: 'codex', force: true })
-    await host.stream('child', undefined) // minimal host cannot classify a child
+    await host.stream('child', 'priority') // minimal host uses the saved composer preference
     await host.setSpeed('child', 'fast')
     await host.stream('child', 'priority') // existing explicit speed still works
+    await host.runtime.dispose()
+    host = await mount()
+    const first: AuthenticatedPrincipal = { source: 'issuer', id: '7', username: 'shared-name', role: 'user' }
+    const second: AuthenticatedPrincipal = { ...first, id: '8' }
+    const modelChoice = { sessionId: 'parent', model: 'fast-model' }
+    assert.equal((await host.call('setSpeed', { ...modelChoice, tier: 'fast' }, first)).ok, true)
+    for (const principal of [second, { ...first, source: 'another-issuer' }]) {
+      const state = await host.call('speed', modelChoice, principal)
+      assert.ok(state.ok)
+      assert.equal((state.value as { tier: string }).tier, 'standard')
+      await host.request(principal)
+      await host.stream('parent', undefined)
+    }
+    await host.runtime.dispose()
+    host = await mount()
+    await host.request({ ...first, username: 'renamed' })
+    await host.stream('parent', 'priority')
+    await host.request(second)
+    await host.stream('parent', undefined)
+    await host.runtime.dispose()
+    host = await mount(true, false, false)
+    assert.deepEqual(await host.call('speed', modelChoice, first), { ok: true, value: { tier: 'standard', fastModels: [] } })
+    await host.request(first)
+    await host.stream('parent', undefined)
   } finally {
     await host?.runtime.dispose()
     if (previous === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previous

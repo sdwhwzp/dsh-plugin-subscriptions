@@ -6,7 +6,8 @@
  * base64 data.
  */
 
-import { LlmError, offloadedImageText } from '@deepseek-ai/dsh-llm'
+import { offloadedImageText } from '@deepseek-ai/dsh-llm'
+import { llmErrorFromFailure } from '../providers/common.js'
 import * as llm from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, Message, RequestMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
@@ -178,14 +179,14 @@ export async function resolveImages(
     ? !('dataBase64' in block) && !('offloaded' in block && block.offloaded === true)
     : block.type === 'tool-result' && block.content.some(hasRetainedImage)
   if (attachments === undefined && messages.some(message => message.content.some(hasRetainedImage))) {
-    throw new LlmError(
-      'dsh-plugin-subscriptions: the request carries an image but no attachments service is mounted; '
-      + 'image input requires the harness attachment store',
-      'UNSUPPORTED',
-    )
+    throw llmErrorFromFailure({
+      message: 'dsh-plugin-subscriptions: the request carries an image but no attachments service is mounted; '
+        + 'image input requires the harness attachment store',
+      code: 'UNSUPPORTED',
+    })
   }
   const readForRequest = async (ref: ImageAttachmentRef) => {
-    if (attachments === undefined) throw new LlmError('No attachment service for retained image', 'UNSUPPORTED')
+    if (attachments === undefined) throw llmErrorFromFailure({ message: 'No attachment service for retained image', code: 'UNSUPPORTED' })
     const target = limit === undefined ? undefined : imageRequestTarget(ref, limit)
     if (target !== undefined) {
       try {
@@ -199,19 +200,24 @@ export async function resolveImages(
     const stored = await attachments.readImage(ref, signal)
     return { data: stored.data, mediaType: stored.ref.mediaType, ref: stored.ref }
   }
-  const resolveBlock = async (block: TranslatableBlock): Promise<TranslatableBlock[]> => {
+  const resolveBlock = async (block: TranslatableBlock, assistant = false): Promise<TranslatableBlock[]> => {
     if (block.type === 'tool-result') {
-      return [{ ...block, content: (await Promise.all(block.content.map(resolveBlock))).flat() }]
+      return [{ ...block, content: (await Promise.all(block.content.map(part => resolveBlock(part)))).flat() }]
     }
     if (block.type !== 'image' || 'dataBase64' in block) return [block]
     if (block.offloaded === true) return [{ type: 'text', text: offloadedImageText(block.attachment) }]
     const { data, mediaType: sentType, ref } = await readForRequest(block.attachment)
     const { attachmentId, mediaType, bytes, width, height, name } = ref
-    return [{
+    const image: ResolvedImagePart = {
       type: 'image',
       mediaType: sentType,
       dataBase64: Buffer.from(data).toString('base64'),
-    }, {
+    }
+    // Assistant replay metadata is indexed by content block. Adding a helper
+    // text block here would shift every later thought signature onto the wrong
+    // block. User/tool image references still carry the editing-tool hint.
+    if (assistant) return [image]
+    return [image, {
       type: 'text',
       text: `Image reference (for image_generate.referenceImages): ${JSON.stringify({
         attachmentId, mediaType, bytes, width, height, ...name === undefined ? {} : { name },
@@ -220,6 +226,6 @@ export async function resolveImages(
   }
   return Promise.all(messages.map(async (message): Promise<TranslatableMessage> => ({
     ...message,
-    content: (await Promise.all(message.content.map(resolveBlock))).flat(),
+    content: (await Promise.all(message.content.map(block => resolveBlock(block, message.role === 'assistant')))).flat(),
   })))
 }

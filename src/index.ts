@@ -12,6 +12,7 @@ import z from '@deepseek-ai/schemastery'
 import { errorChain } from '@deepseek-ai/dsh-llm'
 import type {
   AdapterRegistrationHandle,
+  AuthenticatedPrincipal,
   GenerateOptions,
   LlmAdapter,
   LlmModelInfo,
@@ -19,7 +20,7 @@ import type {
 } from '@deepseek-ai/dsh-llm'
 // Type-only: activates the `ctx.tools` Context merge for the inject block.
 import type {} from '@deepseek-ai/dsh-tools'
-import type {} from '@deepseek-ai/dsh-agent'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 // Type-only: activates the `ctx.web` Context merge for optional registration.
 import type {} from '@deepseek-ai/dsh-web'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
@@ -142,6 +143,7 @@ import { createVideoGenerateTool, videosDirectory } from './tools/video-generate
 import { ensureConnectAttemptTimeout, proxiedFetch, proxyGetConfig, proxySetConfig, proxyTestConnection, restoreConnectAttemptTimeout } from './http.js'
 import { applyImageCommands } from './image-commands.js'
 import { ProviderSettingsStore, PROVIDER_TOOLS, validatePreferences } from './provider-settings.js'
+import { ComposerSpeeds } from './model-speeds.js'
 
 export type { ModelEntry, ProviderUsage, UsageWindow } from './providers/common.js'
 export type { RateLimitConfig, RateLimitWait } from './providers/rate-limit.js'
@@ -207,7 +209,7 @@ export interface Config {
     /** Enable account pooling (default true; needs ≥2 accounts of one provider). */
     enabled?: boolean
     /** Member selection: plain priority failover, or quota-aware urgency scheduling. */
-    strategy?: 'priority' | 'quota_aware'
+    strategy?: 'priority' | 'quota_aware' | 'quota_normalized'
     /** A challenger must out-score the sticky member by this factor to take over (default 2). */
     switchMargin?: number
     /** Auto-pool every catalog model across a provider's logged-in accounts (default true). */
@@ -263,7 +265,7 @@ export const Config: z<Config> = z.object({
   }),
   pool: z.object({
     enabled: z.boolean().default(true),
-    strategy: z.union(['priority', 'quota_aware']).default('quota_aware'),
+    strategy: z.union(['priority', 'quota_aware', 'quota_normalized']).default('quota_aware'),
     switchMargin: z.number().min(1).default(2),
     autoAccounts: z.boolean().default(true),
     autoFamilies: z.boolean(),
@@ -456,8 +458,11 @@ export class SubscriptionsAuthController implements AuthController {
     if (force) this.onUsageForced?.(provider, account)
     const fetcher = this.usageFetchers[provider]
     if (fetcher === undefined) return Promise.resolve({ supported: false })
-    if (this.poolUsage === undefined) return fetcher(account, signal)
-    return this.poolUsage.snapshotFor(provider, account, force)
+    if (this.poolUsage === undefined) return fetcher(account, signal).then(snapshot => {
+      const fetchedAt = Date.now()
+      return { ...snapshot, fetchedAt, staleAt: fetchedAt + 5 * 60_000 }
+    })
+    return this.poolUsage.displaySnapshotFor(provider, account, force)
   }
 
   async readImage(ref: ImageAttachmentRef, signal: AbortSignal): Promise<ImageBytesResult> {
@@ -806,24 +811,23 @@ export function apply(ctx: Context, config: Config): void {
   // Usage lookups resolve the session through the refresh-aware path, so an
   // expired access token renews instead of failing the lookup.
   const usageFetchers: UsageFetchers = {}
-  // Explicit Speed choices are per-session and reset on restart. Subagents
-  // without an explicit choice use their persisted model default. Every
-  // request still gates Fast on the model's discovered capability.
-  const speedBySession = new Map<string, SpeedTier>()
-  // A deployment that does not permit the priority rate reports no fast-capable
-  // model, which is the same state the UI already handles when logged out: the
-  // toggle hides and `/fast` says the tier is unavailable.
+  // Model-bound composer choices persist independently of subagent defaults.
+  // Legacy callers without a model retain the session-only override.
+  const composerSpeeds = new ComposerSpeeds()
   const fastTierOffered = config.fastTier !== false
-  const selectedSpeed = (sessionId: string, model?: string): SpeedTier => {
-    const explicit = speedBySession.get(sessionId)
-    if (explicit !== undefined) return explicit
-    // The request itself carries no subagent flag. The live registry exposes
-    // durable origin metadata for spawn, fork, and resumed subagents alike.
-    const agent = ctx.get('agents')?.get(sessionId as NonNullable<GenerateOptions['sessionId']>)
-    if (model !== undefined && agent?.session.header.origin === 'subagent') {
-      return preferences.subagentSpeed(parseAccountModelId(model)?.model ?? model)
-    }
-    return 'standard'
+  const requestPrincipals = new WeakMap<Agent, AuthenticatedPrincipal>()
+  ctx.on('agent/request', ({ agent, principal }, next) => {
+    if (principal === undefined) requestPrincipals.delete(agent)
+    else requestPrincipals.set(agent, principal)
+    return next()
+  })
+  ctx.on('agent/turn-stopping', ({ agent }) => { requestPrincipals.delete(agent) })
+  const agentFor = (sessionId: string) => ctx.get('agents')?.get(sessionId as NonNullable<GenerateOptions['sessionId']>)
+  const selectedSpeed = (agent: Agent | undefined, sessionId: string, model: string | undefined, principal?: AuthenticatedPrincipal): SpeedTier => {
+    if (model !== undefined) model = parseAccountModelId(model)?.model ?? model
+    const subagentDefault = model !== undefined && agent?.session.header.origin === 'subagent'
+      ? preferences.subagentSpeed(model) : undefined
+    return composerSpeeds.selected(sessionId, model, principal, subagentDefault)
   }
   let codexAdapter: CodexAdapter | undefined
   // Dropped on every copilot auth transition so replay state (captured
@@ -884,11 +888,12 @@ export function apply(ctx: Context, config: Config): void {
           defaultEffortOf: (model: string) => defaultEffortOf('codex', model),
           contextWindowOf: model => preferences.contextWindow(model),
           pool: () => poolAdapter,
-          speedFor: (sessionId: string | undefined, model: string): boolean | Promise<boolean> =>
-            fastTierOffered
-            && sessionId !== undefined
-            && selectedSpeed(sessionId, model) === 'fast'
-            && adapter.supportsFastTier(model),
+          speedFor: (sessionId: string | undefined, model: string): boolean | Promise<boolean> => {
+            if (!fastTierOffered || sessionId === undefined) return false
+            const agent = agentFor(sessionId)
+            const principal = agent && requestPrincipals.get(agent)
+            return selectedSpeed(agent, sessionId, model, principal) === 'fast' && adapter.supportsFastTier(model)
+          },
         })
         codexAdapter = adapter
         adapters.set('codex', adapter)
@@ -1149,7 +1154,8 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   const speed: SpeedController = {
-    async speed(sessionId, model) {
+    async speed(sessionId, model, principal) {
+      if (!fastTierOffered) return { tier: 'standard', fastModels: [] }
       const fastModels = await codexAdapter?.fastCapableModels() ?? []
       const accountPreferences = preferences.get('codex').accounts
       for (const { key } of await codexTokens?.list() ?? []) {
@@ -1160,13 +1166,13 @@ export function apply(ctx: Context, config: Config): void {
         }
       }
       return {
-        tier: fastTierOffered ? selectedSpeed(sessionId, model) : 'standard',
-        fastModels: fastTierOffered ? fastModels : [],
+        tier: model !== undefined && !fastModels.includes(model) ? 'standard' : selectedSpeed(agentFor(sessionId), sessionId, model, principal),
+        fastModels,
       }
     },
-    async setSpeed(sessionId, tier) {
-      // Keep explicit Standard too: a child can override a saved Fast default.
-      speedBySession.set(sessionId, fastTierOffered ? tier : 'standard')
+    async setSpeed(sessionId, tier, model, principal) {
+      if (fastTierOffered) await composerSpeeds.set(sessionId, tier,
+        model === undefined ? undefined : parseAccountModelId(model)?.model ?? model, principal)
     },
   }
   // Per-model default effort overrides (the Settings page's model pickers).
@@ -1294,7 +1300,6 @@ export function apply(ctx: Context, config: Config): void {
         if (provider === 'claude') claudeVersion.invalidate()
         adapter.clearAccountCatalog()
         poolAdapter?.invalidate()
-        handles.get(provider)?.replace([provider])
       }
       const models = await fullCatalogs.get(provider)!(provider)
       // Enumerate each account once, with the same bounds used by pool discovery.
@@ -1322,13 +1327,15 @@ export function apply(ctx: Context, config: Config): void {
           contextWindow: info?.context?.contextWindow,
           efforts: tierIds.has(model.id) ? [] : info?.reasoning?.efforts.map(({ id, name }) => ({ id, name })) ?? [],
           configured: defaultEffortOf(provider, model.id),
-          ...(provider === 'codex' ? { fastTier: !tierIds.has(model.id) && fastModels.has(model.id) } : {}),
+          ...(provider === 'codex' ? { fastTier: fastTierOffered && !tierIds.has(model.id) && fastModels.has(model.id) } : {}),
           ...(contexts.length ? {
             defaultContextWindow: Math.min(...contexts.map(entry => entry.default)),
             maxContextWindow: Math.min(...contexts.map(entry => entry.max)),
           } : {}),
         }
       }))
+      // Announce forced refresh only after the replacement catalog is ready.
+      if (force) handles.get(provider)?.replace([provider])
       return {
         provider, settings: preferences.get(provider), models: rows, tools: PROVIDER_TOOLS[provider],
         // The config value the "follow config" choice resolves to, for the Settings page to label it.

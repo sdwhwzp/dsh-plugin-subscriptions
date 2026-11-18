@@ -27,11 +27,11 @@ import type { ConcretePoolMember, PoolDefinition, PoolMemberRef } from './pool-f
 import { poolKey } from './pool-family.js'
 import { accountKey, classifyPoolFailure, memberKey, PoolHealthRegistry } from './pool-health.js'
 import type { MemberQuota, PoolUsageTracker } from './pool-usage.js'
-import { withAbortSignal } from './common.js'
+import { llmErrorFromFailure, withAbortSignal } from './common.js'
 import { streamAccountWithReplay } from './replay.js'
 
 /** Member-selection strategy: plain priority failover or quota-aware scheduling. */
-export type PoolStrategy = 'priority' | 'quota_aware'
+export type PoolStrategy = 'priority' | 'quota_aware' | 'quota_normalized'
 
 export interface PoolAdapterOptions {
   /** The live subscription adapters, by provider route. */
@@ -263,6 +263,7 @@ export class PoolAdapter extends LlmAdapter {
     if (candidates.length === 0) throw this.exhausted(options.model, members)
     let lastFailure: MemberFailure | undefined
     let tried = 0
+    const emptied: ConcretePoolMember[] = []
     for (const member of candidates) {
       options.signal?.throwIfAborted()
       const adapter = this.options.adapters[member.provider]
@@ -286,7 +287,7 @@ export class PoolAdapter extends LlmAdapter {
         }
         if (first.value.type === 'finish' && first.value.reason.kind === 'error') {
           const failure = first.value.reason.failure
-          throw new LlmError(failure.message, failure.code, failure)
+          throw llmErrorFromFailure(failure)
         }
       } catch (error: unknown) {
         try { await iterator.return?.() } catch { /* preserve the attempt failure */ }
@@ -313,6 +314,7 @@ export class PoolAdapter extends LlmAdapter {
           + ` (${describeFailure(error)}); trying the next member`,
         )
         lastFailure = { member, error }
+        if (error instanceof LlmError && error.code === EMPTY_RESPONSE_CODE) emptied.push(member)
         continue
       }
       this.remember(options.model, options.sessionId, member)
@@ -337,15 +339,20 @@ export class PoolAdapter extends LlmAdapter {
       }
       return
     }
-    throw this.exhausted(options.model, members, lastFailure, tried)
+    const retryNow = emptied.some(member =>
+      this.options.health.isMemberAvailable(member.provider, member.account, member.model))
+    throw this.exhausted(options.model, members, lastFailure, tried, retryNow)
   }
 
   /**
-   * Health and known quota exhaustion filter BOTH strategies: >=100% must
-   * never silently spend paid credits. `quota_aware` ranks healthy members
-   * by urgency, then tries near-full (95–<100%) members by urgency too.
-   * Members without telemetry score zero. Stickiness cannot retain an
-   * exhausted member; within the preferred class it uses `switchMargin`.
+   * Health and known quota exhaustion filter BOTH strategies. An applicable
+   * window at >=100% is skipped unless Codex reports remaining credits; those
+   * accounts stay eligible but rank after every account that still has
+   * included quota. `quota_aware` ranks healthy members by urgency, then
+   * tries near-full (95–<100%) members by urgency too. Members without
+   * telemetry score zero. Stickiness cannot retain an exhausted member, or
+   * a credit-funded member while included quota remains; within the preferred
+   * class it uses `switchMargin`.
    */
   private async select(
     poolId: string,
@@ -357,24 +364,28 @@ export class PoolAdapter extends LlmAdapter {
       && this.options.health.isMemberAvailable(member.provider, member.account, member.model))
     if (usable.length === 0) return []
     const quotas = new Map<ConcretePoolMember, MemberQuota>(
-      await Promise.all(usable.map(async member => [member, await this.options.usage.quotaFor(member)] as const)),
+      await Promise.all(usable.map(async member => [member, await this.options.usage.quotaFor(member, this.options.strategy === 'quota_normalized')] as const)),
     )
     const eligible = usable.filter(member => !quotas.get(member)?.exhausted)
     if (eligible.length === 0) {
-      const message = `pool "${poolId}": all currently usable accounts have exhausted subscription quota (>=100% in an applicable window).`
-        + ' Request stopped to avoid spending paid credits. Wait for a quota reset, or refresh this account’s usage in Settings > Subscriptions after using a reset card.'
-        + ' 订阅额度已耗尽，已停止请求以避免消耗付费 credits；使用重置卡后，请在设置 → 订阅中刷新对应账号的用量。'
+      const message = `pool "${poolId}": all currently usable accounts have exhausted subscription quota (>=100% in an applicable window) and have no remaining Codex credits.`
+        + ' Request stopped. Wait for a quota reset, add credits, or refresh this account’s usage in Settings > Subscriptions after using a reset card.'
+        + ' 订阅额度已耗尽且没有剩余 Codex credits，已停止请求。补充 credits 或使用重置卡后，请在设置 → 订阅中刷新对应账号的用量。'
       this.options.onWarn(message)
       throw new LlmError(message, QUOTA_EXCEEDED_CODE)
     }
+    const included = eligible.filter(member => quotas.get(member)?.creditFunded !== true)
+    const creditFunded = eligible.filter(member => quotas.get(member)?.creditFunded === true)
     const stickyMember = sessionId === undefined
       ? undefined
       : eligible.find(member =>
         memberKey(member.provider, member.account, member.model) === this.sticky.get(stickyKey(poolId, sessionId)))
+    const stickySpendsCredits = stickyMember !== undefined && quotas.get(stickyMember)?.creditFunded === true && included.length > 0
     if (this.options.strategy === 'priority') {
-      return stickyMember === undefined
-        ? eligible
-        : [stickyMember, ...eligible.filter(member => member !== stickyMember)]
+      const ordered = [...included, ...creditFunded]
+      return stickyMember === undefined || stickySpendsCredits
+        ? ordered
+        : [stickyMember, ...ordered.filter(member => member !== stickyMember)]
     }
     const scored = eligible.filter(member => quotas.get(member)?.available === true)
     const quotaFull = eligible.filter(member => quotas.get(member)?.available === false)
@@ -391,6 +402,10 @@ export class PoolAdapter extends LlmAdapter {
         scored.splice(scored.indexOf(stickyMember), 1)
         scored.unshift(stickyMember)
       }
+    } else if (scored.length === 0 && stickyMember !== undefined && quotaFull.includes(stickyMember)) {
+      // Included quota is gone; keep the credit-funded session on its account.
+      quotaFull.splice(quotaFull.indexOf(stickyMember), 1)
+      quotaFull.unshift(stickyMember)
     }
     return [...scored, ...quotaFull]
   }
@@ -414,16 +429,18 @@ export class PoolAdapter extends LlmAdapter {
    * is that failure's own code, never a synthetic `RATE_LIMIT` (a transport
    * blip on a single-member pool used to be reported as a rate limit). The
    * earliest recovery hint is scoped to THIS pool's members (the health
-   * registry is shared across pools).
+   * registry is shared across pools). `retryNow` drops the hint: a member
+   * that returned an empty completion keeps no cooldown and can be retried
+   * at once, so another member's cooldown must not set the wait.
    */
-  private exhausted(model: string, pool: ConcretePoolMember[], last?: MemberFailure, tried = 0): LlmError {
+  private exhausted(model: string, pool: ConcretePoolMember[], last?: MemberFailure, tried = 0, retryNow = false): LlmError {
     const keys = new Set<string>()
     for (const member of pool) {
       keys.add(memberKey(member.provider, member.account, member.model))
       keys.add(accountKey(member.provider, member.account))
     }
     const now = Date.now()
-    const cooling = this.options.health.earliestRecoveryRecord(keys, now)
+    const cooling = retryNow ? undefined : this.options.health.earliestRecoveryRecord(keys, now)
     const retryAfterMs = cooling === undefined ? undefined : Math.max(cooling.unavailableUntil - now, 1)
     const recovers = retryAfterMs === undefined ? '' : ` recovers in ${formatDuration(retryAfterMs)}`
     let message: string
@@ -444,12 +461,11 @@ export class PoolAdapter extends LlmAdapter {
     }
     const failure = last?.error instanceof LlmError ? last.error.failure : undefined
     this.options.onWarn(message)
-    return new LlmError(message, code, {
+    return llmErrorFromFailure({ message, code,
       ...retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs },
       ...failure?.status === undefined ? {} : { status: failure.status },
       ...failure?.requestId === undefined ? {} : { requestId: failure.requestId },
-      ...last === undefined ? {} : { cause: last.error },
-    })
+    }, last === undefined ? undefined : { cause: last.error })
   }
 }
 
